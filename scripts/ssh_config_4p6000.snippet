@@ -1,0 +1,6 @@
+# 追加到本机 ~/.ssh/config 的【末尾】:   cat scripts/ssh_config_4p6000.snippet >> ~/.ssh/config
+# 只补充连接复用（输入一次密码/验证后 8 小时内复用），不改动你已有的 Host 4p6000 配置。
+Host 4p6000
+    ControlMaster auto
+    ControlPersist 8h
+    ControlPath ~/.ssh/cm-%C

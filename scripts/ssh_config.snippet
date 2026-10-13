@@ -1,0 +1,10 @@
+# 追加到本机 ~/.ssh/config：   cat scripts/ssh_config.snippet >> ~/.ssh/config
+# 作用：第一次连接输入一次密码，之后 8 小时内所有 ssh/rsync 复用同一条连接，不再要密码。
+Host cse
+    HostName linux5.cse.cuhk.edu.hk
+    User sguan26
+    ServerAliveInterval 30
+    ServerAliveCountMax 6
+    ControlMaster auto
+    ControlPersist 8h
+    ControlPath ~/.ssh/cm-%C
