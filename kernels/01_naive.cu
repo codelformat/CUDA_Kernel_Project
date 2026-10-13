@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -51,7 +52,7 @@ static std::string path_of(const char* dir, const char* name) {
 static std::vector<float> read_bin(const std::string& path, size_t count) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) {
-        fprintf(stderr, "打不开 %s\n  请先运行 python ref/gen_data.py 生成 data/\n", path.c_str());
+        fprintf(stderr, "打不开 %s\n  请先在本机运行 python ref/gen_data.py，再运行 scripts/push_data.sh\n", path.c_str());
         exit(1);
     }
     std::vector<float> v(count);
@@ -81,7 +82,7 @@ int main(int argc, char** argv) {
 
     cudaDeviceProp prop;
     CK(cudaGetDeviceProperties(&prop, 0));
-    printf("Device: %s (sm_%d%d)   N=%d H=%d eps=%g\n", prop.name, prop.major, prop.minor, N, H, eps);
+    printf("Device: %s (sm_%d%d)   N=%d H=%d eps=%g\n Max Threads: %d", prop.name, prop.major, prop.minor, N, H, eps, prop.maxThreadsPerBlock);
 
     std::vector<float> hx = read_bin(path_of(dir, "x.bin"), nx);
     std::vector<float> hgamma = read_bin(path_of(dir, "gamma.bin"), H);
@@ -99,17 +100,25 @@ int main(int argc, char** argv) {
     CK(cudaMemcpy(d_beta, hbeta.data(), H * sizeof(float), cudaMemcpyHostToDevice));
     CK(cudaMemset(d_y, 0, nx * sizeof(float)));  // 清零：kernel 没写到的位置会因此露馅
 
-    const int threads = 128;
+    const int threads = argc > 2 ? atoi(argv[2]) : 128;
     const int blocks = (N + threads - 1) / threads;
+
+    // 加入第0次启动 kernel 的计时，方便调试。注意：这里不算在 100 次测量里。
+    cudaEvent_t start0, stop0;
+    CK(cudaEventCreate(&start0));
+    CK(cudaEventCreate(&stop0));
+    
     printf("launch: %d blocks x %d threads = %d threads, for %d rows\n", blocks, threads, blocks * threads, N);
-    // ===================== 第 3 课 A：计时（以下 TODO 由你来写）=====================
-    // TODO 6: 在这里创建一对事件：cudaEvent_t start, stop;  cudaEventCreate(&start) / (&stop)。
-    //         整个程序只创建这一对，后面反复复用；用 CK(...) 包住每个 CUDA 调用。
-    // TODO 7: 【第 0 次启动的耗时】给下面这次启动（也是用来校验正确性的那次）计时：
-    //         启动前 cudaEventRecord(start)，启动后 cudaEventRecord(stop)，
-    //         cudaEventSynchronize(stop) 之后用 cudaEventElapsedTime(&ms, start, stop) 读出毫秒，
-    //         打印出来，留着和后面稳定后的耗时对比。
+    CK(cudaEventRecord(start0));
     layernorm_naive<<<blocks, threads>>>(d_x, d_gamma, d_beta, d_y, N, H, eps);
+    CK(cudaEventRecord(stop0));
+    CK(cudaEventSynchronize(stop0));
+    float elapsed0 = 0.f;
+    CK(cudaEventElapsedTime(&elapsed0, start0, stop0));
+    printf("first launch time = %.3f ms\n", elapsed0);
+    CK(cudaEventDestroy(start0));
+    CK(cudaEventDestroy(stop0));
+    
     CK(cudaGetLastError());       // 检查启动参数是否合法
     CK(cudaDeviceSynchronize());  // 等 kernel 真正跑完，并捕获运行期错误
 
@@ -160,7 +169,6 @@ int main(int argc, char** argv) {
     // 先别算带宽，下一课再做。
     // ===============================================================================
     
->>>>>>> 58080c013e4a17a962c67a609a48fb9fae814539
 
     cudaFree(d_x); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_y);
     return pass ? 0 : 1;
