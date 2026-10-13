@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <cuda_runtime.h>
 
 #define CK(call) do { cudaError_t e_ = (call); if (e_ != cudaSuccess) { \
@@ -118,6 +119,40 @@ int main(int argc, char** argv) {
     const bool pass = (n_nan == 0) && (max_abs < tol);
     printf("max_abs_err = %.3e (row %zu, col %zu)   nan = %zu   -> %s (tol %.0e)\n",
            max_abs, worst / H, worst % H, n_nan, pass ? "PASS" : "FAIL", tol);
+
+    // TODO 8: 热身。直接再启动 10 次同一个 kernel（参数和上面一样），不计时。
+    //         循环结束后调一次 cudaDeviceSynchronize()，确保热身真的做完了。
+    for (int i = 0; i < 10; i ++) {
+        layernorm_naive<<<blocks, threads>>>(d_x, d_gamma, d_beta, d_y, N, H, eps);
+    }
+    CK(cudaDeviceSynchronize());
+    // TODO 9: 正式测量 100 次，每次独立计时，结果存进 std::vector<float> times(100)：
+    //         每一轮：cudaEventRecord(start) -> 启动 kernel -> cudaEventRecord(stop)
+    //                 -> cudaEventSynchronize(stop) -> cudaEventElapsedTime(&times[i], start, stop)
+    //         注意：只围住 kernel 启动这一行，不要把 cudaMemcpy / cudaMemset 放进去。
+    cudaEvent_t start, stop;
+    CK(cudaEventCreate(&start));
+    CK(cudaEventCreate(&stop));
+    std::vector<float> times(100);
+    for (int i = 0; i < 100; i ++) {
+        CK(cudaEventRecord(start));
+        layernorm_naive<<<blocks, threads>>>(d_x, d_gamma, d_beta, d_y, N, H, eps);
+        CK(cudaEventRecord(stop));
+        CK(cudaEventSynchronize(stop));
+        float elapsed = 0.f;
+        CK(cudaEventElapsedTime(&elapsed, start, stop));
+        times[i] = elapsed;
+    }
+    // TODO 10: std::sort(times.begin(), times.end())（需要在文件开头 #include <algorithm>），
+    //          打印中位数 times[50] 和最小值 times[0]，单位 ms。
+    std::sort(times.begin(), times.end());
+    printf("median time = %.3f ms, min time = %.3f ms\n", times[50], times[0]);
+    // TODO 11: 释放事件：cudaEventDestroy(start) / (stop)。
+    CK(cudaEventDestroy(start));
+    CK(cudaEventDestroy(stop));
+    // 先别算带宽，下一课再做。
+    // ===============================================================================
+    
 
     cudaFree(d_x); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_y);
     return pass ? 0 : 1;
