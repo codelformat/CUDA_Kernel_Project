@@ -50,7 +50,7 @@ static std::string path_of(const char* dir, const char* name) {
 static std::vector<float> read_bin(const std::string& path, size_t count) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) {
-        fprintf(stderr, "打不开 %s\n  请先在本机运行 python ref/gen_data.py，再运行 scripts/push_data.sh\n", path.c_str());
+        fprintf(stderr, "打不开 %s\n  请先运行 python ref/gen_data.py 生成 data/\n", path.c_str());
         exit(1);
     }
     std::vector<float> v(count);
@@ -101,6 +101,13 @@ int main(int argc, char** argv) {
     const int threads = 128;
     const int blocks = (N + threads - 1) / threads;
     printf("launch: %d blocks x %d threads = %d threads, for %d rows\n", blocks, threads, blocks * threads, N);
+    // ===================== 第 3 课 A：计时（以下 TODO 由你来写）=====================
+    // TODO 6: 在这里创建一对事件：cudaEvent_t start, stop;  cudaEventCreate(&start) / (&stop)。
+    //         整个程序只创建这一对，后面反复复用；用 CK(...) 包住每个 CUDA 调用。
+    // TODO 7: 【第 0 次启动的耗时】给下面这次启动（也是用来校验正确性的那次）计时：
+    //         启动前 cudaEventRecord(start)，启动后 cudaEventRecord(stop)，
+    //         cudaEventSynchronize(stop) 之后用 cudaEventElapsedTime(&ms, start, stop) 读出毫秒，
+    //         打印出来，留着和后面稳定后的耗时对比。
     layernorm_naive<<<blocks, threads>>>(d_x, d_gamma, d_beta, d_y, N, H, eps);
     CK(cudaGetLastError());       // 检查启动参数是否合法
     CK(cudaDeviceSynchronize());  // 等 kernel 真正跑完，并捕获运行期错误
@@ -118,6 +125,18 @@ int main(int argc, char** argv) {
     const bool pass = (n_nan == 0) && (max_abs < tol);
     printf("max_abs_err = %.3e (row %zu, col %zu)   nan = %zu   -> %s (tol %.0e)\n",
            max_abs, worst / H, worst % H, n_nan, pass ? "PASS" : "FAIL", tol);
+
+    // TODO 8: 热身。直接再启动 10 次同一个 kernel（参数和上面一样），不计时。
+    //         循环结束后调一次 cudaDeviceSynchronize()，确保热身真的做完了。
+    // TODO 9: 正式测量 100 次，每次独立计时，结果存进 std::vector<float> times(100)：
+    //         每一轮：cudaEventRecord(start) -> 启动 kernel -> cudaEventRecord(stop)
+    //                 -> cudaEventSynchronize(stop) -> cudaEventElapsedTime(&times[i], start, stop)
+    //         注意：只围住 kernel 启动这一行，不要把 cudaMemcpy / cudaMemset 放进去。
+    // TODO 10: std::sort(times.begin(), times.end())（需要在文件开头 #include <algorithm>），
+    //          打印中位数 times[50] 和最小值 times[0]，单位 ms。
+    // TODO 11: 释放事件：cudaEventDestroy(start) / (stop)。
+    // 先别算带宽，下一课再做。
+    // ===============================================================================
 
     cudaFree(d_x); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_y);
     return pass ? 0 : 1;
