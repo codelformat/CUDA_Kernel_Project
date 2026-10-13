@@ -25,6 +25,3 @@ __pycache__/
 .fuse_hidden*
 .vscode/
 .idea/
-
-# 租用云主机的连接信息（含真实主机/端口），只留在本机
-scripts/ssh_config_seeta.snippet

@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# 用法: scripts/run.sh kernels/xxx.cu [-m run|nsys|ncu|nvprof|all] [-a "程序参数"] [-k ncu核函数名正则] [-c ncu抓取次数] [-s ncu set]
-#   默认目标机器见 scripts/config.sh；临时切换:  TARGET=cse scripts/run.sh ...
-#   run: 只编译+运行 | nsys: +时间线 | ncu: +Nsight Compute(Volta 及以上) | nvprof: +旧版 profiler(Pascal 用) | all: nsys + 当前 GPU 能用的那个
-set -euo pipefail
+# 在【当前机器】上编译并运行 CUDA 程序，可选 Nsight 分析。无需 ssh / Slurm：
+# 把仓库 clone 到有 GPU 的节点上，在仓库根目录直接运行。
+#
+# 用法: scripts/run.sh kernels/xxx.cu [-m run|nsys|ncu|all] [-a "程序参数"] [-k ncu核函数名正则] [-c ncu抓取次数] [-s ncu set]
+#   run : 编译 + 运行（默认）      nsys: + Nsight Systems 时间线
+#   ncu : + Nsight Compute         all : nsys + ncu
+# 环境变量: GPU_INDEX=<n>  指定显卡（默认自动选最空闲的）   NVCC_FLAGS="..."  追加 nvcc 选项
+set -eo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT/scripts/config.sh"
+cd "$ROOT"
 
-[ $# -ge 1 ] || { sed -n '2,4p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '2,8p' "$0"; exit 2; }
 SRC="$1"; shift
 MODE=run; ARGS=""; KERNEL=""; NCU_COUNT=5; NCU_SET=full
 while getopts "m:a:k:c:s:" o; do
@@ -15,82 +19,75 @@ while getopts "m:a:k:c:s:" o; do
     *) exit 2;;
   esac
 done
-[ -f "$ROOT/$SRC" ] || { echo "找不到 ${SRC}（路径相对项目根目录）"; exit 2; }
-case "$MODE" in run|nsys|ncu|nvprof|all) ;; *) echo "-m 只能是 run|nsys|ncu|nvprof|all"; exit 2;; esac
-require_master || exit 1
+[ -f "$SRC" ] || { echo "找不到 ${SRC}（路径相对仓库根目录）"; exit 2; }
+case "$MODE" in run|nsys|ncu|all) ;; *) echo "-m 只能是 run|nsys|ncu|all"; exit 2;; esac
+command -v nvcc >/dev/null 2>&1 || { echo "PATH 里没有 nvcc"; exit 1; }
+command -v nvidia-smi >/dev/null 2>&1 || { echo "找不到 nvidia-smi：这台机器没有 GPU 驱动？"; exit 1; }
 
-echo "==> [1/4] 同步代码、脚本、数据（增量）-> ${REMOTE_HOST}:${REMOTE_DIR}   (target=${TARGET}, mode=${REMOTE_MODE})"
-rsh <<EOF
-mkdir -p $(printf %q "$REMOTE_DIR")
-EOF
-rsync -az --exclude '.git/' --exclude 'results/' --exclude 'logs/' --exclude '.DS_Store' --exclude '__pycache__/' --exclude ".venv/" \
-  "$ROOT/" "${REMOTE_HOST}:${REMOTE_DIR}/"
+NAME=$(basename "$SRC" .cu)
+TAG=$(date +%Y%m%d-%H%M%S)
+OUT=results/${NAME}_${TAG}
+mkdir -p "$OUT" logs
+BIN="$OUT/$NAME"
+exec > >(tee "logs/${NAME}_${TAG}.log") 2>&1
 
-mkdir -p "$ROOT/results" "$ROOT/logs"
-ST=UNKNOWN
+echo "== GPU =="
+hostname; date
+nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu --format=csv
+GPU_INDEX=${GPU_INDEX:-auto}
+if [ "$GPU_INDEX" = auto ]; then
+  GPU_INDEX=$(nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader,nounits \
+              | sort -t, -k2,2n -k3,3n | sed -n 1p | cut -d, -f1 | tr -d ' ')
+fi
+export CUDA_VISIBLE_DEVICES=$GPU_INDEX
+GPU_NAME=$(nvidia-smi -i "$GPU_INDEX" --query-gpu=name --format=csv,noheader)
+CC=$(nvidia-smi -i "$GPU_INDEX" --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d '. ' || true)
+case "$CC" in ''|*[!0-9]*) CC="";; esac
+read -r USED UTIL < <(nvidia-smi -i "$GPU_INDEX" --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits | tr -d ',')
+echo "-> 使用 GPU $GPU_INDEX: $GPU_NAME  (sm_${CC:-?})  已用显存 ${USED} MiB, 利用率 ${UTIL}%"
+if [ "${USED:-0}" -gt 500 ] || [ "${UTIL:-0}" -gt 10 ]; then
+  echo "!! 这块卡正被别人使用，计时结果会失真（可用 GPU_INDEX=<n> 换卡，或稍后再测）"
+fi
 
-if [ "$REMOTE_MODE" = direct ]; then
-  ID=$(date +%Y%m%d-%H%M%S)
-  echo "==> [2/4] 在 ${REMOTE_HOST} 上直接编译并运行 (tag=${ID})"
-  echo "------------------------------ 实时输出"
-  set +e
-  rsh <<EOF 2>&1 | tee "$ROOT/logs/direct_${ID}.out"
-cd $(printf %q "$REMOTE_DIR")
-mkdir -p results
-export SRC=$(printf %q "$SRC") MODE=$(printf %q "$MODE") ARGS=$(printf %q "$ARGS") KERNEL=$(printf %q "$KERNEL") NCU_COUNT=$(printf %q "$NCU_COUNT") NCU_SET=$(printf %q "$NCU_SET") TAG=$(printf %q "$ID") GPU_INDEX=$(printf %q "${GPU_INDEX:-auto}")
-bash scripts/node_job.sh </dev/null
-EOF
-  RC=${PIPESTATUS[0]}
-  set -e
-  echo "------------------------------"
-  if [ "$RC" -eq 0 ]; then ST=COMPLETED; else ST="FAILED(exit ${RC})"; fi
-  LOG="$ROOT/logs/direct_${ID}.out"
-else
-  echo "==> [2/4] 提交 Slurm 作业 (src=${SRC} mode=${MODE})   sbatch ${SLURM_BASE} -t ${SLURM_TIME}"
-  SUBMIT_OUT=$(rsh <<EOF
-$(slurm_pre)
-cd $(printf %q "$REMOTE_DIR")
-mkdir -p logs results
-export SRC=$(printf %q "$SRC") MODE=$(printf %q "$MODE") ARGS=$(printf %q "$ARGS") KERNEL=$(printf %q "$KERNEL") NCU_COUNT=$(printf %q "$NCU_COUNT") NCU_SET=$(printf %q "$NCU_SET")
-sbatch ${SLURM_BASE} -t ${SLURM_TIME} scripts/job.sbatch 2>&1
-EOF
-  )
-  echo "$SUBMIT_OUT"
-  ID=$(echo "$SUBMIT_OUT" | sed -n 's/.*Submitted batch job \([0-9][0-9]*\).*/\1/p' | tail -1)
-  [ -n "$ID" ] || { echo "提交失败：没有拿到 job id（先跑 scripts/doctor.sh 排查）"; exit 1; }
+echo; echo "== 编译 =="
+ARCH_FLAG="-arch=sm_${CC}"; [ -n "$CC" ] || ARCH_FLAG="-arch=native"
+nvcc --version | tail -2
+set -x
+nvcc -O3 -lineinfo -std=c++17 $ARCH_FLAG ${NVCC_FLAGS:-} "$SRC" -o "$BIN"
+set +x
 
-  echo "==> [3/4] 等待作业 ${ID}（排队时间取决于 GPU 是否空闲）"
-  last=""; unknown=0
-  while :; do
-    S=$(rsh <<EOF
-$(slurm_pre)
-s=\$(squeue -h -j $ID -o '%T|%r' 2>/dev/null | head -1)
-if [ -z "\$s" ]; then s=\$(scontrol show job $ID 2>/dev/null | grep -o 'JobState=[A-Z_]*' | head -1 | cut -d= -f2); fi
-echo "\${s:-UNKNOWN}"
-EOF
-    ) || S=UNKNOWN
-    ST=${S%%|*}
-    if [ "$S" != "$last" ]; then echo "    $(date +%H:%M:%S)  $S"; last="$S"; fi
-    case "$ST" in
-      COMPLETED|FAILED|CANCELLED*|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE) break;;
-      UNKNOWN) unknown=$((unknown+1)); if [ $unknown -ge 3 ]; then break; fi;;
-      *) unknown=0;;
-    esac
-    sleep "$POLL_SEC"
-  done
-  rsync -az --include="cuda_${ID}.out" --exclude='*' "${REMOTE_HOST}:${REMOTE_DIR}/logs/" "$ROOT/logs/" || true
-  LOG="$ROOT/logs/cuda_${ID}.out"
-  echo "------------------------------ 作业输出: logs/cuda_${ID}.out"
-  cat "$LOG" 2>/dev/null || echo "(没有找到日志)"
-  echo "------------------------------"
-  if [ "$ST" != COMPLETED ] || [ ! -s "$LOG" ]; then
-    echo "==> 作业没有正常完成，自动诊断（scripts/why.sh ${ID}）:"
-    bash "$ROOT/scripts/why.sh" "$ID" || true
-    echo "------------------------------"
+if [ ! -f data/meta.txt ] && [ "$NAME" != 00_smoke_vecadd ]; then
+  echo "!! 没有 data/meta.txt：先生成测试数据  scripts/setup_env.sh && source .venv/bin/activate && python ref/gen_data.py"
+fi
+
+echo; echo "== 运行 =="
+"$BIN" $ARGS
+
+find_tool() {   # find_tool 名字 glob...
+  local n=$1; shift
+  if command -v "$n" >/dev/null 2>&1; then command -v "$n"; return 0; fi
+  local g p
+  for g in "$@"; do p=$(ls -d $g 2>/dev/null | sort -V | tail -1 || true); [ -n "$p" ] && { echo "$p"; return 0; }; done
+  return 0
+}
+CUDA_ROOT=$(dirname "$(dirname "$(command -v nvcc)")")
+
+if [ "$MODE" = nsys ] || [ "$MODE" = all ]; then
+  echo; echo "== Nsight Systems =="
+  NSYS=$(find_tool nsys "$CUDA_ROOT/nsight-systems-*/bin/nsys" "/opt/nvidia/nsight-systems/*/bin/nsys")
+  if [ -z "$NSYS" ]; then echo "(没有找到 nsys，跳过)"; else
+    "$NSYS" profile -o "$OUT/nsys" --force-overwrite true "$BIN" $ARGS
+    "$NSYS" stats -r cuda_gpu_kern_sum,cuda_gpu_mem_time_sum "$OUT/nsys.nsys-rep" || true
   fi
 fi
 
-echo "==> 拉回产物"
-rsync -az --include="*_${ID}/" --include="*_${ID}/**" --exclude='*' "${REMOTE_HOST}:${REMOTE_DIR}/results/" "$ROOT/results/" || true
-echo "最终状态: ${ST}    日志: ${LOG#"$ROOT"/}    产物: results/*_${ID}/"
-[ "$ST" = COMPLETED ]
+if [ "$MODE" = ncu ] || [ "$MODE" = all ]; then
+  echo; echo "== Nsight Compute (set=$NCU_SET count=$NCU_COUNT kernel=${KERNEL:-<全部>}) =="
+  NCU=$(find_tool ncu "$CUDA_ROOT/nsight-compute-*/ncu" "/opt/nvidia/nsight-compute/*/ncu")
+  if [ -z "$NCU" ]; then echo "(没有找到 ncu，跳过)"; else
+    "$NCU" --set "$NCU_SET" ${KERNEL:+-k "regex:$KERNEL"} -c "$NCU_COUNT" -o "$OUT/ncu" --force-overwrite "$BIN" $ARGS
+    "$NCU" --import "$OUT/ncu.ncu-rep" --page details | sed -n 1,200p || true
+  fi
+fi
+
+echo; echo "== 完成，产物: $PWD/$OUT   日志: logs/${NAME}_${TAG}.log =="
