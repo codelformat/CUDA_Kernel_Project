@@ -1,78 +1,56 @@
-# CUDA Kernel Project — LayerNorm 从 naive 到优化
+# LayerNorm CUDA Kernel：从 naive 到带宽上限的 97%
 
-手写 CUDA LayerNorm kernel（fp32，N=4096，H=1024），从最朴素的版本逐步优化，每一步只改一件事，并以 PyTorch 的正确性和性能作为对照。
+从零手写 CUDA 的 LayerNorm kernel，一步一步优化，每一步只改一件事、先测量再下结论。最终版比最初版快约 **19 倍**，速度超过 PyTorch 自带实现，并接近这块 GPU 的显存带宽上限。
 
-## 结果一览（RTX PRO 6000 Blackwell，冷 L2，256 线程，中位耗时）
-| 版本 | 本轮改动 | 耗时 | 相对 PyTorch |
+## 成果一览
+| 指标 | 结果 |
+|---|---|
+| 同口径提速（naive → 最终版） | 0.560 ms → **0.029 ms**，约 **19×**（naive 自己调到最佳 0.267 ms，则约 9×） |
+| 对比 PyTorch `F.layer_norm` | 最终版 0.029 ms，PyTorch 0.031 ms，达到 PyTorch 的 **107%** |
+| 对比硬件上限 | 纯拷贝（只搬数据、不计算）0.028 ms，最终版达到其 **97%** |
+| 正确性 | 每个版本都与 PyTorch 对比，最大绝对误差 < 1e-5（实测约 3e-6） |
+
+测试条件：NVIDIA RTX PRO 6000 Blackwell，fp32，4096 行 × 1024 列，256 线程/block，先清空 L2 缓存再计时（中位数）。
+
+| 版本 | 耗时 | 离带宽上限还有多远（越长越接近） |
+|---|---|---|
+| v1 每行一个线程 | 0.560 ms | `█░░░░░░░░░░░░░░░░░░░` 5% |
+| v2 每行一个线程块 | 0.040 ms | `██████████████░░░░░░` 70% |
+| v3 数据缓存在寄存器 | 0.032 ms | `██████████████████░░` 88% |
+| v4 向量化读写 | **0.029 ms** | `███████████████████░` **97%** |
+
+## 优化历程
+| 版本 | 发现的问题 | 怎么改 | 效果 |
 |---|---|---|---|
-| v1 `01_naive` | 一个 thread 一行，三遍扫描 | 0.560 ms（32 线程最佳 0.267 ms） | 5.5% |
-| v2 `02_block_per_row` | 一个 block 一行：合并访存 + 共享内存树形归约 | 0.040 ms | 78% |
-| v3 `03_regcache` | x 只读一次，缓存在寄存器 | 0.032 ms | 97% |
-| v4 `04_vec4` | `float4` 向量化 load/store（128 位访存） | **0.029 ms** | **107%** |
+| **v1** 朴素版 | 能算对，但很慢。只有 4096 个线程，吃不满 188 个计算单元；同组线程读的内存地址彼此相隔很远，访存效率极低。有个反直觉的现象：每个 block 的线程越少反而越快 | 作为基线 | 0.560 ms |
+| **v2** 一行一个 block | 同上 | 让一整个线程块协作处理一行：相邻线程读相邻数据，行内求和用共享内存并行归约。调试时漏了一处同步，结果出错（误差 17.8），定位后修复 | 0.040 ms（**14×**） |
+| **v3** 寄存器缓存 | 同一行的数据被从显存读了 3 次 | 每个线程把自己的数据读一次，留在寄存器里复用，并用编译器输出确认没有溢出到显存 | 0.032 ms（−20%） |
+| **v4** 向量化 | 每条读写指令只搬 4 字节 | 改成一次搬 16 字节（`float4`），用反汇编确认编译器真的发出了 128 位指令；重复 3 次结果稳定 | 0.029 ms（−9%） |
 
-对照：PyTorch `F.layer_norm` 0.031 ms；纯拷贝 kernel（带宽上限）0.028 ms，v4 达到其 97%。v1 → v4 同口径（256 线程）约 19 倍。所有版本与 PyTorch 的 `max_abs_err < 1e-5`。
-每一轮遇到的问题、怎么发现、怎么改，以及测量方法（冷 L2、计时分辨率）、验证证据和局限见 [RESULTS.md](RESULTS.md)。
+**中途推翻并重做的一件事：测量方法。** v2 的带宽一度算出"104.9% 的显存峰值"，这不可能。原因是数据只有 32 MB，全部装进了 128 MB 的 L2 缓存。于是改成每次计时前先清空缓存，并加上两条对照线（纯拷贝、PyTorch），之后所有数字都用这套口径。
 
-## 目录
+**为什么停在 v4：** 它只比纯拷贝慢一个计时刻度（约 3%，小于计时精度），说明计算已被访存完全盖住，再优化测不出收益。
+
+## 这个项目体现的能力
+- **先测量再优化**：每一步都先提假设、再用实验验证，不凭感觉改代码。
+- **性能分析**：理解 GPU 的线程组织、内存层次与带宽瓶颈；在没有 Nsight Compute 计数器权限的环境里，用对照实验、编译器寄存器报告和反汇编完成归因。
+- **严谨对待数据**：发现并修正测量偏差；区分"测得出的差异"与"噪声"；明确写出局限。
+
+## 仓库结构
 | 路径 | 内容 |
 |---|---|
-| `kernels/00_smoke_vecadd.cu` | 环境冒烟测试（SAXPY） |
-| `kernels/01_naive.cu` | v1：每行一个线程，三遍扫描（均值 → 方差 → 输出） |
-| `kernels/02_block_per_row.cu` | v2：每行一个 block，合并访存 + 共享内存树形归约 |
-| `kernels/03_regcache.cu` | v3：x 只读一次，缓存在寄存器（模板常量保证不 spill） |
-| `kernels/04_vec4.cu` | v4：`float4` 向量化 load/store |
-| `kernels/common.cuh` | 各版本共用的测试框架：正确性校验、热身、计时、冷 L2（`FLUSH_L2=1`）、有效带宽 |
-| `kernels/block_reduce.cuh` | block 内求和归约（v2~v4 共用） |
-| `kernels/bench_copy.cu` | 纯拷贝 kernel，作为带宽上限的参照 |
-| `ref/bench_torch.py` | PyTorch `F.layer_norm` 的计时参照（eager / CUDA graph，热 / 冷 L2） |
-| `RESULTS.md` | 各版本的数据、方法、验证证据、结论与局限 |
-| `ref/layernorm_ref.py` | NumPy 参考实现（有偏方差，ε=1e-5） |
-| `ref/gen_data.py` | 用 PyTorch 生成输入与参考输出到 `data/`（不入库） |
-| `scripts/run.sh` | 本机编译 + 运行 + 可选 Nsight 分析 |
-| `scripts/setup_env.sh` | 创建 `.venv`（numpy + torch），用于生成数据 |
+| `kernels/01_naive.cu` … `04_vec4.cu` | 四个版本的 kernel |
+| `kernels/common.cuh` | 共用的测试框架：正确性校验、计时、清空 L2、带宽计算 |
+| `kernels/bench_copy.cu`、`ref/bench_torch.py` | 两条对照线：纯拷贝、PyTorch |
+| `RESULTS.md` | 完整数据、测量方法、每一步的证据与局限 |
+| `docs/USAGE.md` | 运行方法与本地一键远程运行脚本的用法 |
 
-## 在 GPU 机器上使用
-需要：`nvcc`、`nvidia-smi`（可选 `nsys` / `ncu`）。
-
+## 复现
 ```bash
-git clone https://github.com/codelformat/CUDA_Kernel_Project.git && cd CUDA_Kernel_Project
-
-# 1. 生成测试数据（N=4096 行, H=1024 列），写入 data/
-scripts/setup_env.sh && source .venv/bin/activate
-python ref/gen_data.py
-
-# 2. 编译并运行（自动按 GPU 选 -arch=sm_XX），打印与 PyTorch 的 max_abs_err
-scripts/run.sh kernels/01_naive.cu
-
-# 2b. 冷 L2 计时（先把 L2 冲掉，才是真正的显存带宽），指定 256 线程/block
-FLUSH_L2=1 scripts/run.sh kernels/04_vec4.cu -a "data 256"
-NVCC_FLAGS="-Xptxas -v" scripts/run.sh kernels/04_vec4.cu         # 看每个 thread 的寄存器数与 spill
-
-# 3. 分析
-scripts/run.sh kernels/01_naive.cu -m nsys                        # Nsight Systems
-scripts/run.sh kernels/01_naive.cu -m ncu -k layernorm -c 1       # Nsight Compute，只抓 layernorm 开头的 kernel
-scripts/run.sh kernels/01_naive.cu -m all                         # 两者都跑
-GPU_INDEX=1 scripts/run.sh kernels/01_naive.cu                    # 多卡机器上指定显卡
+python ref/gen_data.py                                      # 生成测试数据
+FLUSH_L2=1 scripts/run.sh kernels/04_vec4.cu -a "data 256"  # 运行最终版并与 PyTorch 对比
 ```
-产物在 `results/<kernel>_<时间>/`，日志在 `logs/`（均不入库）。之后更新代码用 `git pull`。
+更多用法见 [docs/USAGE.md](docs/USAGE.md)。
 
-## 从本地一键远程运行（推荐）
-本地改代码，用 `scripts/remote.sh` 同步到 GPU 服务器、远程编译运行，输出实时打印回本地终端。
-需要：`~/.ssh/config` 里有免密登录的主机别名（默认 `4p6000`）。所有 ssh / rsync 复用**同一条** SSH 连接（ControlMaster），对服务器只有一次登录。
-
-```bash
-scripts/remote.sh kernels/01_naive.cu                 # 同步 + 远程 scripts/run.sh
-scripts/remote.sh kernels/01_naive.cu -m nsys         # 参数原样传给 run.sh
-scripts/remote.sh kernels/01_naive.cu -a "data 32"
-scripts/remote.sh sync -n                             # 只预览会同步哪些文件
-scripts/remote.sh sh python ref/gen_data.py           # 在远程项目目录跑任意命令
-scripts/remote.sh fetch                               # 拉回 .ncu-rep / .nsys-rep / .log
-scripts/remote.sh status | down                       # 查看 / 关闭复用的连接
-```
-默认值可用环境变量覆盖：`REMOTE_HOST` `REMOTE_DIR` `CONDA_ENV`（见脚本头部注释）。本地是唯一的代码来源，不要在服务器上直接改被同步的文件。
-
-## 正确性标准
-float32 下与 `torch.nn.functional.layer_norm` 的最大绝对误差 < 1e-5。
-
-## 备注
-早期版本曾通过 ssh + Slurm 从本机远程提交作业（CUHK CSE GPU 集群）；现在改为直接在 GPU 节点上运行，相关脚本已移除，仍可在 git 历史（提交 `aa7259c`）中找到。
+## 局限
+只测了一个规模（4096 × 1024，fp32）和一块 GPU；只实现前向；最终版要求列数能被 4×线程数整除。没有 Nsight Compute 的计数器权限，瓶颈归因是基于对照实验的推断。详见 [RESULTS.md](RESULTS.md)。
