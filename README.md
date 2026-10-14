@@ -1,14 +1,30 @@
 # CUDA Kernel Project — LayerNorm 从 naive 到优化
 
-手写 CUDA LayerNorm kernel，逐步优化，并用 Nsight 分析瓶颈；以 PyTorch 结果和性能作为对照。
+手写 CUDA LayerNorm kernel（fp32，N=4096，H=1024），从最朴素的版本逐步优化，每一步只改一件事，并以 PyTorch 的正确性和性能作为对照。
 
-每一轮优化的做法、测量方法和结果见 [RESULTS.md](RESULTS.md)。
+## 结果一览（RTX PRO 6000 Blackwell，冷 L2，256 线程，中位耗时）
+| 版本 | 本轮改动 | 耗时 | 相对 PyTorch |
+|---|---|---|---|
+| v2 `02_block_per_row` | 一个 block 一行：合并访存 + 共享内存树形归约 | 0.040 ms | 78% |
+| v3 `03_regcache` | x 只读一次，缓存在寄存器 | 0.032 ms | 97% |
+| v4 `04_vec4` | `float4` 向量化 load/store（128 位访存） | **0.029 ms** | **107%** |
+
+对照：PyTorch `F.layer_norm` 0.031 ms；纯拷贝 kernel（带宽上限）0.028 ms，v4 达到其 97%。所有版本与 PyTorch 的 `max_abs_err < 1e-5`。
+每一轮的做法、测量方法（冷 L2、计时分辨率）、验证证据和局限见 [RESULTS.md](RESULTS.md)。
 
 ## 目录
 | 路径 | 内容 |
 |---|---|
 | `kernels/00_smoke_vecadd.cu` | 环境冒烟测试（SAXPY） |
-| `kernels/01_naive.cu` | 版本 1：每行一个线程，三遍扫描（均值 → 方差 → 输出） |
+| `kernels/01_naive.cu` | v1：每行一个线程，三遍扫描（均值 → 方差 → 输出） |
+| `kernels/02_block_per_row.cu` | v2：每行一个 block，合并访存 + 共享内存树形归约 |
+| `kernels/03_regcache.cu` | v3：x 只读一次，缓存在寄存器（模板常量保证不 spill） |
+| `kernels/04_vec4.cu` | v4：`float4` 向量化 load/store |
+| `kernels/common.cuh` | 各版本共用的测试框架：正确性校验、热身、计时、冷 L2（`FLUSH_L2=1`）、有效带宽 |
+| `kernels/block_reduce.cuh` | block 内求和归约（v2~v4 共用） |
+| `kernels/bench_copy.cu` | 纯拷贝 kernel，作为带宽上限的参照 |
+| `ref/bench_torch.py` | PyTorch `F.layer_norm` 的计时参照（eager / CUDA graph，热 / 冷 L2） |
+| `RESULTS.md` | 各版本的数据、方法、验证证据、结论与局限 |
 | `ref/layernorm_ref.py` | NumPy 参考实现（有偏方差，ε=1e-5） |
 | `ref/gen_data.py` | 用 PyTorch 生成输入与参考输出到 `data/`（不入库） |
 | `scripts/run.sh` | 本机编译 + 运行 + 可选 Nsight 分析 |
@@ -26,6 +42,10 @@ python ref/gen_data.py
 
 # 2. 编译并运行（自动按 GPU 选 -arch=sm_XX），打印与 PyTorch 的 max_abs_err
 scripts/run.sh kernels/01_naive.cu
+
+# 2b. 冷 L2 计时（先把 L2 冲掉，才是真正的显存带宽），指定 256 线程/block
+FLUSH_L2=1 scripts/run.sh kernels/04_vec4.cu -a "data 256"
+NVCC_FLAGS="-Xptxas -v" scripts/run.sh kernels/04_vec4.cu         # 看每个 thread 的寄存器数与 spill
 
 # 3. 分析
 scripts/run.sh kernels/01_naive.cu -m nsys                        # Nsight Systems
