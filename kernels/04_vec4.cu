@@ -21,12 +21,12 @@ __global__ void layernorm_vec4(const float* x, const float* gamma, const float* 
 
     float4 v[VEC];   // 这个 thread 的 VEC 个 float4，即 4*VEC 个 float，常驻寄存器
 
-    // ============================== 你要写的部分 ==============================
+    // ============================== kernel 主体 ==============================
     // 约定：第 i 个 float4 的下标 k = tid + i * blockDim.x（单位是 float4）。
     //       它对应的列号是 4*k, 4*k+1, 4*k+2, 4*k+3；gamma、beta 同样用 g4[k]、b4[k] 一次取 4 个。
     //       float4 的四个分量叫 .x .y .z .w。
 
-    // TODO 1: 第一遍。对 i = 0 .. VEC-1：v[i] = xr[k]（一条指令读 16 B），把 4 个分量都累加进部分和；
+    // 步骤 1: 第一遍。对 i = 0 .. VEC-1：v[i] = xr[k]（一条指令读 16 B），把 4 个分量都累加进部分和；
     //         block_reduce_sum -> 除以 H（注意是 H，不是 H/4）得到 mean。
     float mean = 0.f;
     #pragma unroll
@@ -36,7 +36,7 @@ __global__ void layernorm_vec4(const float* x, const float* gamma, const float* 
     }
     mean = block_reduce_sum(mean, smem) / H;
 
-    // TODO 2: 第二遍。只用 v[i]：4 个分量各算 (分量 - mean)^2，累加 -> 归约 -> 除以 H 得到 var。
+    // 步骤 2: 第二遍。只用 v[i]：4 个分量各算 (分量 - mean)^2，累加 -> 归约 -> 除以 H 得到 var。
     float var = 0.f;
     #pragma unroll
     for (int i = 0; i < VEC; ++i) {
@@ -51,10 +51,9 @@ __global__ void layernorm_vec4(const float* x, const float* gamma, const float* 
     }
     var = block_reduce_sum(var, smem) / H;
 
-    // TODO 3: 第三遍。对每个 i：取 g = g4[k]、b = b4[k]，4 个分量各自算
+    // 步骤 3: 第三遍。对每个 i：取 g = g4[k]、b = b4[k]，4 个分量各自算
     //         (分量 - mean) / sqrtf(var + eps) * g.分量 + b.分量，拼成一个 float4，一次写回 yr[k]。
     // ========================================================================
-    (void)v; (void)mean; (void)var; (void)yr; (void)g4; (void)b4; (void)xr; (void)eps; (void)tid;
     #pragma unroll
     for (int i = 0; i < VEC; ++i) {
         int k = tid + i * blockDim.x;
