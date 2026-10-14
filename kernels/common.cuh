@@ -62,6 +62,9 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     printf("== %s ==\n", name);
     printf("Device: %s (sm_%d%d, %d SMs)   N=%d H=%d eps=%g   threads/block=%d\n",
            prop.name, prop.major, prop.minor, prop.multiProcessorCount, N, H, eps, threads);
+    int l2_bytes = 0;
+    CK(cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, dev));
+    printf("L2 cache = %.0f MB\n", l2_bytes / 1048576.0);
 
     std::vector<float> hx = read_bin(dir + "/x.bin", nx);
     std::vector<float> hgamma = read_bin(dir + "/gamma.bin", H);
