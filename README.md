@@ -2,6 +2,8 @@
 
 手写 CUDA LayerNorm kernel，逐步优化，并用 Nsight 分析瓶颈；以 PyTorch 结果和性能作为对照。
 
+每一轮优化的做法、测量方法和结果见 [RESULTS.md](RESULTS.md)。
+
 ## 目录
 | 路径 | 内容 |
 |---|---|
