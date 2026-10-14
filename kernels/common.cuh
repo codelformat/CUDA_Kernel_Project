@@ -37,7 +37,8 @@ static std::vector<float> read_bin(const std::string& path, size_t count) {
     return v;
 }
 
-static int run_benchmark(const char* name, LaunchFn launch, int argc, char** argv) {
+// check=false：跳过与 y_ref 的比对（给拷贝带宽测试这类“不是 LayerNorm”的 kernel 用）
+static int run_benchmark(const char* name, LaunchFn launch, int argc, char** argv, bool check = true) {
     const std::string dir = argc > 1 ? argv[1] : "data";
     const int threads = argc > 2 ? atoi(argv[2]) : 256;
     const char* pk = getenv("PEAK_GBPS");
@@ -116,9 +117,13 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
         if (d > max_abs) { max_abs = d; worst = i; }
     }
     const float tol = 1e-5f;
-    const bool pass = (n_nan == 0) && (max_abs < tol);
-    printf("max_abs_err = %.3e (row %zu, col %zu)   nan = %zu   -> %s (tol %.0e)\n",
-           max_abs, worst / H, worst % H, n_nan, pass ? "PASS" : "FAIL", tol);
+    const bool pass = !check || ((n_nan == 0) && (max_abs < tol));
+    if (check) {
+        printf("max_abs_err = %.3e (row %zu, col %zu)   nan = %zu   -> %s (tol %.0e)\n",
+               max_abs, worst / H, worst % H, n_nan, pass ? "PASS" : "FAIL", tol);
+    } else {
+        printf("(已跳过正确性校验：这不是 LayerNorm kernel)\n");
+    }
 
     // ---- 热身 10 次，不计时 ----
     for (int i = 0; i < 10; ++i) launch(d_x, d_gamma, d_beta, d_y, N, H, eps, threads);
