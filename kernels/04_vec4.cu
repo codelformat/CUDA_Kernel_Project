@@ -29,14 +29,44 @@ __global__ void layernorm_vec4(const float* x, const float* gamma, const float* 
     // TODO 1: 第一遍。对 i = 0 .. VEC-1：v[i] = xr[k]（一条指令读 16 B），把 4 个分量都累加进部分和；
     //         block_reduce_sum -> 除以 H（注意是 H，不是 H/4）得到 mean。
     float mean = 0.f;
+    #pragma unroll
+    for (int i = 0; i < VEC; ++i) {
+        v[i] = xr[tid + i * blockDim.x];
+        mean += v[i].x + v[i].y + v[i].z + v[i].w;
+    }
+    mean = block_reduce_sum(mean, smem) / H;
 
     // TODO 2: 第二遍。只用 v[i]：4 个分量各算 (分量 - mean)^2，累加 -> 归约 -> 除以 H 得到 var。
     float var = 0.f;
+    #pragma unroll
+    for (int i = 0; i < VEC; ++i) {
+        float diff = v[i].x - mean;
+        var += diff * diff;
+        diff = v[i].y - mean;
+        var += diff * diff;
+        diff = v[i].z - mean;
+        var += diff * diff;
+        diff = v[i].w - mean;
+        var += diff * diff;
+    }
+    var = block_reduce_sum(var, smem) / H;
 
     // TODO 3: 第三遍。对每个 i：取 g = g4[k]、b = b4[k]，4 个分量各自算
     //         (分量 - mean) / sqrtf(var + eps) * g.分量 + b.分量，拼成一个 float4，一次写回 yr[k]。
     // ========================================================================
     (void)v; (void)mean; (void)var; (void)yr; (void)g4; (void)b4; (void)xr; (void)eps; (void)tid;
+    #pragma unroll
+    for (int i = 0; i < VEC; ++i) {
+        int k = tid + i * blockDim.x;
+        float4 g = g4[k];
+        float4 b = b4[k];
+        float4 out;
+        out.x = (v[i].x - mean) / sqrtf(var + eps) * g.x + b.x;
+        out.y = (v[i].y - mean) / sqrtf(var + eps) * g.y + b.y;
+        out.z = (v[i].z - mean) / sqrtf(var + eps) * g.z + b.z;
+        out.w = (v[i].w - mean) / sqrtf(var + eps) * g.w + b.w;
+        yr[k] = out;
+    }
 }
 
 void launch(const float* x, const float* gamma, const float* beta, float* y,
