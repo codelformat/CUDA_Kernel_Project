@@ -77,6 +77,17 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     CK(cudaMalloc(&d_gamma, H * sizeof(float)));
     CK(cudaMalloc(&d_beta, H * sizeof(float)));
     CK(cudaMalloc(&d_y, nx * sizeof(float)));
+
+    // (A) 在 cudaMalloc 那一批之后、第 0 次启动之前加：
+    const char* fl = getenv("FLUSH_L2");
+    const bool flush = fl && atoi(fl) != 0;
+    int l2_sz = 0;
+    CK(cudaDeviceGetAttribute(&l2_sz, cudaDevAttrL2CacheSize, dev));
+    const size_t flush_bytes = (size_t)l2_sz * 2;      // 比 L2 大一倍，保证冲干净
+    void* d_flush = nullptr;
+    if (flush) CK(cudaMalloc(&d_flush, flush_bytes));
+    printf("FLUSH_L2=%d\n", (int)flush);
+
     CK(cudaMemcpy(d_x, hx.data(), nx * sizeof(float), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(d_gamma, hgamma.data(), H * sizeof(float), cudaMemcpyHostToDevice));
     CK(cudaMemcpy(d_beta, hbeta.data(), H * sizeof(float), cudaMemcpyHostToDevice));
@@ -117,6 +128,8 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     // ---- 正式测量 100 次，每次单独计时（只围住 kernel 启动）----
     std::vector<float> times(100);
     for (int i = 0; i < 100; ++i) {
+        // (B) 在"正式测量 100 次"的循环里，放在 CK(cudaEventRecord(start)); 的【前面】：
+        if (flush) CK(cudaMemset(d_flush, 0, flush_bytes));
         CK(cudaEventRecord(start));
         launch(d_x, d_gamma, d_beta, d_y, N, H, eps, threads);
         CK(cudaEventRecord(stop));
@@ -137,5 +150,8 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     CK(cudaEventDestroy(start));
     CK(cudaEventDestroy(stop));
     cudaFree(d_x); cudaFree(d_gamma); cudaFree(d_beta); cudaFree(d_y);
+
+    // (C) 结尾的 cudaFree 那一行里加上：
+    cudaFree(d_flush);
     return pass ? 0 : 1;
 }
