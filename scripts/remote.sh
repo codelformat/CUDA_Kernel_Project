@@ -65,7 +65,7 @@ do_sync() {
 remote_exec() {
   local cmd env_prefix="" v script b64
   cmd="$(printf '%q ' "$@")"
-  for v in GPU_INDEX NVCC_FLAGS; do
+  for v in GPU_INDEX NVCC_FLAGS FLUSH_L2 PEAK_GBPS; do
     if [ -n "${!v:-}" ]; then env_prefix="$env_prefix$v=$(printf '%q' "${!v}") "; fi
   done
   read -r -d '' script <<EOF || true
