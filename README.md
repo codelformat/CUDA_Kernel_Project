@@ -5,12 +5,13 @@
 ## 结果一览（RTX PRO 6000 Blackwell，冷 L2，256 线程，中位耗时）
 | 版本 | 本轮改动 | 耗时 | 相对 PyTorch |
 |---|---|---|---|
+| v1 `01_naive` | 一个 thread 一行，三遍扫描 | 0.560 ms（32 线程最佳 0.267 ms） | 5.5% |
 | v2 `02_block_per_row` | 一个 block 一行：合并访存 + 共享内存树形归约 | 0.040 ms | 78% |
 | v3 `03_regcache` | x 只读一次，缓存在寄存器 | 0.032 ms | 97% |
 | v4 `04_vec4` | `float4` 向量化 load/store（128 位访存） | **0.029 ms** | **107%** |
 
-对照：PyTorch `F.layer_norm` 0.031 ms；纯拷贝 kernel（带宽上限）0.028 ms，v4 达到其 97%。所有版本与 PyTorch 的 `max_abs_err < 1e-5`。
-每一轮的做法、测量方法（冷 L2、计时分辨率）、验证证据和局限见 [RESULTS.md](RESULTS.md)。
+对照：PyTorch `F.layer_norm` 0.031 ms；纯拷贝 kernel（带宽上限）0.028 ms，v4 达到其 97%。v1 → v4 同口径（256 线程）约 19 倍。所有版本与 PyTorch 的 `max_abs_err < 1e-5`。
+每一轮遇到的问题、怎么发现、怎么改，以及测量方法（冷 L2、计时分辨率）、验证证据和局限见 [RESULTS.md](RESULTS.md)。
 
 ## 目录
 | 路径 | 内容 |
