@@ -25,14 +25,32 @@ __global__ void layernorm_regs(const float* x, const float* gamma, const float* 
     //         循环前加 #pragma unroll，且循环上界必须写 ITEMS（常量），不能写 H / blockDim.x。
     float mean = 0.f;
 
+    #pragma unroll
+    for (int i = 0; i < ITEMS; ++i) {
+        v[i] = xr[tid + i * blockDim.x];
+        mean += v[i];
+    }
+    mean = block_reduce_sum(mean, smem) / H;
+
     // TODO 2: 第二遍。这次【不再碰 xr】：直接用 v[i] 累加 (v[i] - mean)^2 的部分和 -> 归约 -> 除以 H 得到 var。
     float var = 0.f;
+
+    #pragma unroll
+    for (int i = 0; i < ITEMS; ++i) {
+        float diff = v[i] - mean;
+        var += diff * diff;
+    }
+    var = block_reduce_sum(var, smem) / H;
 
     // TODO 3: 第三遍。同样只用 v[i]：
     //         yr[tid + i * blockDim.x] = (v[i] - mean) / sqrtf(var + eps) * gamma[该元素的列号] + beta[该元素的列号]。
     //         （gamma、beta 每次还是从全局内存读，它们很小，会一直待在缓存里，这一版先不管。）
     // ========================================================================
     (void)v; (void)mean; (void)var; (void)yr; (void)gamma; (void)beta; (void)eps;
+    for (int i = 0; i < ITEMS; ++i) {
+        int col = tid + i * blockDim.x;
+        yr[col] = (v[i] - mean) / sqrtf(var + eps) * gamma[col] + beta[col];
+    }
 }
 
 void launch(const float* x, const float* gamma, const float* beta, float* y,

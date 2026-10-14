@@ -66,6 +66,13 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     int l2_bytes = 0;
     CK(cudaDeviceGetAttribute(&l2_bytes, cudaDevAttrL2CacheSize, dev));
     printf("L2 cache = %.0f MB\n", l2_bytes / 1048576.0);
+    int a, b, c, d;
+    CK(cudaDeviceGetAttribute(&a, cudaDevAttrMaxThreadsPerMultiProcessor, dev));
+    CK(cudaDeviceGetAttribute(&b, cudaDevAttrMaxBlocksPerMultiprocessor, dev));
+    CK(cudaDeviceGetAttribute(&c, cudaDevAttrMaxSharedMemoryPerMultiprocessor, dev));
+    CK(cudaDeviceGetAttribute(&d, cudaDevAttrMaxRegistersPerMultiprocessor, dev));
+    printf("per SM: max threads %d, max blocks %d, shared mem %d KB, registers %d (%d KB)\n",
+       a, b, c / 1024, d, d * 4 / 1024);
 
     std::vector<float> hx = read_bin(dir + "/x.bin", nx);
     std::vector<float> hgamma = read_bin(dir + "/gamma.bin", H);
