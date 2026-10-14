@@ -52,11 +52,12 @@ fi
 echo; echo "== 编译 =="
 ARCH_FLAG="-arch=sm_${CC}"; [ -n "$CC" ] || ARCH_FLAG="-arch=native"
 nvcc --version | tail -2
+LIBS=""; case "$SRC" in matmul/*) LIBS="-lcublas";; esac   # matmul 的测试框架用 cuBLAS 当参考
 set -x
-nvcc -O3 -lineinfo -std=c++17 $ARCH_FLAG ${NVCC_FLAGS:-} "$SRC" -o "$BIN"
+nvcc -O3 -lineinfo -std=c++17 $ARCH_FLAG ${NVCC_FLAGS:-} "$SRC" -o "$BIN" $LIBS
 set +x
 
-if [ ! -f data/meta.txt ] && [ "$NAME" != 00_smoke_vecadd ]; then
+if [ ! -f data/meta.txt ] && [ "$NAME" != 00_smoke_vecadd ] && [[ "$SRC" != matmul/* ]]; then
   echo "!! 没有 data/meta.txt：先生成测试数据  scripts/setup_env.sh && source .venv/bin/activate && python ref/gen_data.py"
 fi
 
