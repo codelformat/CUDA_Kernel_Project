@@ -21,11 +21,23 @@ __global__ void gemm_naive(const float* A, const float* B, float* C, int M, int 
     //         用 blockIdx / blockDim / threadIdx 的 x、y 分量；
     //         X_IS_ROW == 0 时 x 方向对应列、y 方向对应行；X_IS_ROW == 1 时反过来。
     int row = 0, col = 0;
+    if (X_IS_ROW) {
+        row = blockIdx.x * blockDim.x + threadIdx.x;
+        col = blockIdx.y * blockDim.y + threadIdx.y;
+    } else {
+        row = blockIdx.y * blockDim.y + threadIdx.y;
+        col = blockIdx.x * blockDim.x + threadIdx.x;
+    }
 
     // TODO 2: 越界保护（grid 是向上取整算出来的，M、N 不一定是 BX/BY 的整数倍）。
+    if (row >= M || col >= N) return;
 
     // TODO 3: 沿 K 方向累加 sum += A[row][k] * B[k][col]，最后写 C[row][col]。
-    (void)A; (void)B; (void)C; (void)M; (void)N; (void)K; (void)row; (void)col;
+    float sum = 0.0f;
+    for (int k = 0; k< K; k++) {
+        sum += A[row * K + k] * B[k * N + col];
+    }
+    C[row * N + col] = sum;
 }
 // ========================================================================
 
