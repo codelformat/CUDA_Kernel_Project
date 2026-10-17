@@ -28,7 +28,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # 机器档案 machines/<名字>.env 提供 REMOTE_HOST / REMOTE_DIR / CONDA_ENV 的默认值（同名环境变量优先）
 MACHINE="${MACHINE:-omen}"
 PROFILE="$ROOT/machines/$MACHINE.env"
-[ -f "$PROFILE" ] || { echo "[remote] 找不到机器档案 $PROFILE（可选: $(ls "$ROOT"/machines/*.env 2>/dev/null | xargs -n1 basename | sed 's/\.env$//' | tr '\n' ' ')）" >&2; exit 2; }
+[ -f "$PROFILE" ] || { echo "[remote] 找不到机器档案 ${PROFILE}（可选: $(ls "$ROOT"/machines/*.env 2>/dev/null | xargs -n1 basename | sed 's/\.env$//' | tr '\n' ' ')）" >&2; exit 2; }
 eval "$( . "$PROFILE"; printf 'REMOTE_HOST=%q REMOTE_DIR=%q CONDA_ENV=%q' "$REMOTE_HOST" "$REMOTE_DIR" "$CONDA_ENV" )"
 SSH_PERSIST="${SSH_PERSIST:-8h}"
 
@@ -92,7 +92,7 @@ EOF
   b64="$(printf '%s' "$script" | base64 | tr -d '\n')"
   local t0=$SECONDS rc=0
   ssh "${SSH_OPTS[@]}" -tt "$REMOTE_HOST" "bash -ic \"\$(echo $b64 | base64 -d)\"" || rc=$?
-  echo "[remote] 结束，退出码 $rc，耗时 $((SECONDS - t0)) 秒" >&2
+  echo "[remote] 结束，退出码 ${rc}，耗时 $((SECONDS - t0)) 秒" >&2
   return $rc
 }
 
