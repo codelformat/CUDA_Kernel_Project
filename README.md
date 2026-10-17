@@ -1,8 +1,25 @@
-# LayerNorm CUDA Kernel：从 naive 到带宽上限的 97%
+# CUDA Kernel Project：从零手写并优化 GPU 算子
 
-从零手写 CUDA 的 LayerNorm kernel，一步一步优化，每一步只改一件事、先测量再下结论。最终版比最初版快约 **19 倍**，速度超过 PyTorch 自带实现，并接近这块 GPU 的显存带宽上限。
+从零手写 CUDA 算子，一步一步优化，每一步只改一件事、先测量再下结论，并以 PyTorch / cuBLAS 为对照。
 
-## 成果一览
+## 项目一览
+| 算子 | 状态 | 实验机器 | 一句话结果 |
+|---|---|---|---|
+| **LayerNorm**（`kernels/`） | 已完成 | 机器 A：RTX PRO 6000 | 比最初版快约 19 倍，达到 PyTorch 的 107%、带宽上限的 97% |
+| **matmul**（`matmul/`） | 进行中 | 机器 B：RTX 3080 Ti Laptop | 路线：CUDA core 分块优化 → 张量核心（`mma.sync`）→ CUTLASS，见 [matmul/README.md](matmul/README.md) |
+
+## 实验环境
+| | 机器 A | 机器 B |
+|---|---|---|
+| 用在 | LayerNorm | matmul |
+| GPU | RTX PRO 6000 Blackwell Server（sm_120，188 SM，128 MB L2） | RTX 3080 Ti Laptop（sm_86，58 SM，4 MB L2） |
+| 工具链 | CUDA 13.2 | nvcc 12.4，Nsight Compute 可用 |
+
+每张结果表都标明机器，两台机器的数字不直接比较。详情见 [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md)。
+
+# LayerNorm
+
+## 成果一览（机器 A）
 | 指标 | 结果 |
 |---|---|
 | 同口径提速（naive → 最终版） | 0.560 ms → **0.029 ms**，约 **19×**（naive 自己调到最佳 0.267 ms，则约 9×） |
@@ -19,7 +36,7 @@
 | v3 数据缓存在寄存器 | 0.032 ms | `██████████████████░░` 88% |
 | v4 向量化读写 | **0.029 ms** | `███████████████████░` **97%** |
 
-## 优化历程
+## 优化历程（机器 A）
 | 版本 | 发现的问题 | 怎么改 | 效果 |
 |---|---|---|---|
 | **v1** 朴素版 | 能算对，但很慢。只有 4096 个线程，吃不满 188 个计算单元；同组线程读的内存地址彼此相隔很远，访存效率极低。有个反直觉的现象：每个 block 的线程越少反而越快 | 作为基线 | 0.560 ms |
@@ -39,10 +56,13 @@
 ## 仓库结构
 | 路径 | 内容 |
 |---|---|
-| `kernels/01_naive.cu` … `04_vec4.cu` | 四个版本的 kernel |
+| `kernels/01_naive.cu` … `04_vec4.cu` | LayerNorm 的四个版本 |
 | `kernels/common.cuh` | 共用的测试框架：正确性校验、计时、清空 L2、带宽计算 |
 | `kernels/bench_copy.cu`、`ref/bench_torch.py` | 两条对照线：纯拷贝、PyTorch |
-| `RESULTS.md` | 完整数据、测量方法、每一步的证据与局限 |
+| `RESULTS.md` | LayerNorm 的完整数据、测量方法、每一步的证据与局限 |
+| `matmul/` | 矩阵乘：测试框架（含 cuBLAS 参照）与各版本 kernel |
+| `machines/*.env` | 每台机器的主机、峰值等参数，脚本按 GPU 型号自动选用 |
+| `docs/ENVIRONMENTS.md` | 两台实验机器的详细配置与测量注意事项 |
 | `docs/USAGE.md` | 运行方法与本地一键远程运行脚本的用法 |
 
 ## 复现

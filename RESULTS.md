@@ -1,7 +1,7 @@
-# 优化记录与测量结果
+# LayerNorm 优化记录与测量结果（机器 A）
 
 ## 环境与方法
-- 硬件：NVIDIA RTX PRO 6000 Blackwell Server Edition（sm_120，188 个 SM，L2 128 MB，显存标称带宽 1597 GB/s），CUDA 13.2
+- 机器 A（`machines/rtxpro6000.env`，详见 [docs/ENVIRONMENTS.md](docs/ENVIRONMENTS.md)）。硬件：NVIDIA RTX PRO 6000 Blackwell Server Edition（sm_120，188 个 SM，L2 128 MB，显存标称带宽 1597 GB/s），CUDA 13.2
 - 问题规模：fp32，N=4096 行，H=1024 列，eps=1e-5（x 和 y 各 16 MiB）
 - 正确性：与 `torch.nn.functional.layer_norm` 比较，`max_abs_err < 1e-5`（下面所有版本均 PASS）
 - 计时：CUDA event 只围住一次 kernel 启动，热身 10 次，正式 100 次取**中位数**

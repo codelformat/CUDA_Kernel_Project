@@ -4,7 +4,7 @@
 //
 // 约定（行主序 row-major）：A 是 M×K，B 是 K×N，C 是 M×N；C = A · B。
 // 命令行:  <程序> [M N K]   只给一个数就是 M=N=K=该数；默认 4096 4096 4096
-// 环境变量: PEAK_TFLOPS 理论峰值(默认 120，来自 RTX PRO 6000 Blackwell Server 数据手册的 FP32 峰值)
+// 环境变量: PEAK_TFLOPS FP32 理论峰值；scripts/run.sh 按 GPU 型号从 machines/*.env 自动设置，未设置则不显示相对峰值的百分比
 //           WARMUP 热身次数(默认 3)   REPS 正式计时次数(默认 20)   TOL 相对误差阈值(默认 2e-5)
 #pragma once
 #include <algorithm>
@@ -74,13 +74,14 @@ static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv
     if (argc >= 4) { M = atoi(argv[1]); N = atoi(argv[2]); K = atoi(argv[3]); }
     else if (argc == 2) { M = N = K = atoi(argv[1]); }
     if (M <= 0 || N <= 0 || K <= 0) { fprintf(stderr, "M N K 必须是正整数\n"); return 1; }
-    const double peak = env_dbl("PEAK_TFLOPS", 120.0);
+    const double peak = env_dbl("PEAK_TFLOPS", 0.0);
     const double tol = env_dbl("TOL", 2e-5);
     const int warmup = env_int("WARMUP", 3), reps = env_int("REPS", 20);
 
     cudaDeviceProp prop;
     CK(cudaGetDeviceProperties(&prop, 0));
     printf("== %s ==\n", name);
+    if (const char* mid = getenv("MACHINE_ID")) printf("Machine: %s\n", mid);
     printf("Device: %s (sm_%d%d, %d SMs)   M=%d N=%d K=%d (fp32)\n",
            prop.name, prop.major, prop.minor, prop.multiProcessorCount, M, N, K);
 
@@ -137,10 +138,14 @@ static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv
     const float ms_me = bench_median_ms([&]() { fn(dA, dB, dC, M, N, K); }, warmup, reps);
     const double tf_ref = flops / (ms_ref * 1e-3) / 1e12;
     const double tf_me = flops / (ms_me * 1e-3) / 1e12;
-    printf("cuBLAS SGEMM : median %9.3f ms   %7.2f TFLOPS   (%5.1f%% of %.0f TFLOPS peak)\n",
-           ms_ref, tf_ref, 100.0 * tf_ref / peak, peak);
-    printf("%-13s: median %9.3f ms   %7.2f TFLOPS   (%5.1f%% of peak, %5.1f%% of cuBLAS)\n",
-           name, ms_me, tf_me, 100.0 * tf_me / peak, 100.0 * tf_me / tf_ref);
+    char pk_ref[64] = "PEAK_TFLOPS 未设置", pk_me[64] = "";
+    if (peak > 0) {
+        snprintf(pk_ref, sizeof pk_ref, "%5.1f%% of %.1f TFLOPS peak", 100.0 * tf_ref / peak, peak);
+        snprintf(pk_me, sizeof pk_me, "%5.1f%% of peak, ", 100.0 * tf_me / peak);
+    }
+    printf("cuBLAS SGEMM : median %9.3f ms   %7.2f TFLOPS   (%s)\n", ms_ref, tf_ref, pk_ref);
+    printf("%-13s: median %9.3f ms   %7.2f TFLOPS   (%s%5.1f%% of cuBLAS)\n",
+           name, ms_me, tf_me, pk_me, 100.0 * tf_me / tf_ref);
 
     CKB(cublasDestroy(handle));
     CK(cudaFree(dA)); CK(cudaFree(dB)); CK(cudaFree(dC)); CK(cudaFree(dRef));

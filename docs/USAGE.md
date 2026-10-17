@@ -40,7 +40,7 @@ scripts/remote.sh sh python ref/gen_data.py           # 在远程项目目录跑
 scripts/remote.sh fetch                               # 拉回 .ncu-rep / .nsys-rep / .log
 scripts/remote.sh status | down                       # 查看 / 关闭复用的连接
 ```
-默认值可用环境变量覆盖：`REMOTE_HOST` `REMOTE_DIR` `CONDA_ENV`（见脚本头部注释）。本地是唯一的代码来源，不要在服务器上直接改被同步的文件。
+默认值取自机器档案 `machines/<名字>.env`，用 `MACHINE=omen`（默认）或 `MACHINE=rtxpro6000` 选择；`scripts/remote.sh info` 查看当前解析结果；也可以用 `REMOTE_HOST` `REMOTE_DIR` `CONDA_ENV` 环境变量覆盖（见脚本头部注释）。本地是唯一的代码来源，不要在服务器上直接改被同步的文件。
 
 ## 正确性标准
 float32 下与 `torch.nn.functional.layer_norm` 的最大绝对误差 < 1e-5。

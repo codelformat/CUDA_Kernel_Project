@@ -2,7 +2,7 @@
 //   读数据 -> 拷到 GPU -> 第 0 次启动 + 正确性校验 -> 热身 10 次 -> 正式计时 100 次 -> 报告耗时与有效带宽
 // 每个 kernel 文件只需要提供一个 launch 函数，再在 main 里调用 run_benchmark 即可。
 // 命令行:  <程序> [数据目录, 默认 data] [threads_per_block, 默认 256]
-// 环境变量: PEAK_GBPS 理论显存带宽(GB/s)，默认 1597（RTX PRO 6000 Blackwell Server 标称值）
+// 环境变量: PEAK_GBPS 理论显存带宽(GB/s)；scripts/run.sh 会按 GPU 型号从 machines/*.env 自动设置，未设置则不显示相对峰值的百分比
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -42,7 +42,8 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     const std::string dir = argc > 1 ? argv[1] : "data";
     const int threads = argc > 2 ? atoi(argv[2]) : 256;
     const char* pk = getenv("PEAK_GBPS");
-    const double peak_gbps = pk ? atof(pk) : 1597.0;
+    const double peak_gbps = pk ? atof(pk) : 0.0;
+    if (const char* mid = getenv("MACHINE_ID")) printf("Machine: %s\n", mid);
 
     int N = 0, H = 0;
     float eps = 0.f;
@@ -154,10 +155,15 @@ static int run_benchmark(const char* name, LaunchFn launch, int argc, char** arg
     // 有效带宽 = 理想最少搬运字节数 / 耗时。最少字节 = x 读一次 + y 写一次（gamma/beta 太小，忽略）
     const double bytes = 2.0 * (double)N * (double)H * sizeof(float);
     auto gbps = [&](double ms) { return bytes / (ms * 1e6); };
-    printf("median = %.3f ms  (%.1f GB/s, %.1f%% of %.0f GB/s peak)\n",
-           times[50], gbps(times[50]), 100.0 * gbps(times[50]) / peak_gbps, peak_gbps);
-    printf("min    = %.3f ms  (%.1f GB/s, %.1f%% of %.0f GB/s peak)\n",
-           times[0], gbps(times[0]), 100.0 * gbps(times[0]) / peak_gbps, peak_gbps);
+    if (peak_gbps > 0) {
+        printf("median = %.3f ms  (%.1f GB/s, %.1f%% of %.0f GB/s peak)\n",
+               times[50], gbps(times[50]), 100.0 * gbps(times[50]) / peak_gbps, peak_gbps);
+        printf("min    = %.3f ms  (%.1f GB/s, %.1f%% of %.0f GB/s peak)\n",
+               times[0], gbps(times[0]), 100.0 * gbps(times[0]) / peak_gbps, peak_gbps);
+    } else {
+        printf("median = %.3f ms  (%.1f GB/s, PEAK_GBPS 未设置)\n", times[50], gbps(times[50]));
+        printf("min    = %.3f ms  (%.1f GB/s)\n", times[0], gbps(times[0]));
+    }
 
     CK(cudaEventDestroy(start));
     CK(cudaEventDestroy(stop));

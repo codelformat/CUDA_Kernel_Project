@@ -2,7 +2,7 @@
   热 L2 / 冷 L2（每次计时前写一块 256 MB 缓冲区把 L2 冲掉），热身 10 次，计时 100 次取中位数。
   eager 会把 PyTorch 每次调用的 CPU 开销也量进去；cuda graph 把它去掉，更接近 kernel 本身。
 用法:  CUDA_VISIBLE_DEVICES=0 python ref/bench_torch.py        （N、H 取自 data/meta.txt）
-环境变量: PEAK_GBPS（默认 1597）  FLUSH_MB（清 L2 的缓冲区大小，默认 256）
+环境变量: PEAK_GBPS（run.sh 按机器档案设置；未设置则不显示百分比）  FLUSH_MB（清 L2 的缓冲区大小，默认 256）
 """
 import os
 
@@ -38,7 +38,9 @@ def time_it(fn, flush_buf, iters=100, warmup=10):
 
 def main():
     N, H, eps = read_meta()
-    peak = float(os.environ.get("PEAK_GBPS", 1597))
+    peak = float(os.environ.get("PEAK_GBPS", 0))
+    if os.environ.get("MACHINE_ID"):
+        print("Machine:", os.environ["MACHINE_ID"])
     flush_mb = int(os.environ.get("FLUSH_MB", 256))
     dev = torch.device("cuda")
     print("== torch F.layer_norm ==")
@@ -71,7 +73,8 @@ def main():
     for mode, fn in (("eager", eager), ("cuda graph", replay)):
         for cache, fb in (("热 L2", None), ("冷 L2", flush_buf)):
             med, mn = time_it(fn, fb)
-            print(f"{mode:10s} {cache}:  median = {med:.3f} ms ({gbps(med):7.1f} GB/s, {100 * gbps(med) / peak:5.1f}% of {peak:.0f})"
+            pct = f"{100 * gbps(med) / peak:5.1f}% of {peak:.0f}" if peak > 0 else "PEAK_GBPS 未设置"
+            print(f"{mode:10s} {cache}:  median = {med:.3f} ms ({gbps(med):7.1f} GB/s, {pct})"
                   f"   min = {mn:.3f} ms")
 
 

@@ -1,10 +1,14 @@
 # matmul（GEMM）优化路线
 
 目标：手写 `C = A · B`（行主序），从最朴素的版本一路优化到张量核心，并以 cuBLAS 为参照。
-测试环境同 LayerNorm：NVIDIA RTX PRO 6000 Blackwell（sm_120），CUDA 13.2。
+
+## 实验环境
+**机器 B**（`machines/omen.env`）：HP OMEN 17 笔记本，NVIDIA GeForce RTX 3080 Ti Laptop GPU（Ampere，sm_86，58 SM，4 MB L2，16 GB GDDR6，约 512 GB/s），
+nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高时钟 2100 MHz），但笔记本的持续时钟更低，所以**主要指标是相对 cuBLAS 的百分比**。
+详见 [docs/ENVIRONMENTS.md](../docs/ENVIRONMENTS.md)。**本目录的每张结果表都要写明机器和 CUDA 版本。**（LayerNorm 用的是另一台机器 A，数字不可比。）
 
 ## 路线（每一步只改一件事，先预测、再测量、再解释）
-**阶段 A：FP32 CUDA core（SIMT）**，参照 cuBLAS SGEMM（FP32 峰值 120 TFLOPS，数据手册值）
+**阶段 A：FP32 CUDA core（SIMT）**，参照 cuBLAS SGEMM
 1. `01_naive`：一个 thread 一个输出元素
 2. 合并访存（线程到输出元素的映射）
 3. 共享内存分块（tiling）
@@ -22,8 +26,8 @@
 11. 用 CUTLASS 的 Ampere 风格（`mma.sync`）GEMM 对照手写版
 12. CuTe 的 Layout / TiledMMA / TiledCopy，读懂 CUTLASS 怎么选分块与流水线
 
-> 注：sm_120 使用 `mma.sync`（HMMA）这一代张量核心指令，不支持 Hopper 的 `wgmma` 和数据中心 Blackwell 的 `tcgen05`/TMEM；
-> CUTLASS 在 sm_120 上的新内核主要面向块缩放低精度（NVFP4/MXFP8）。所以阶段 B、C 以 `mma.sync` 为主线。
+> 注：sm_86（Ampere）的张量核心指令就是 `mma.sync`，配合 `ldmatrix` 和 `cp.async`，也是 CUTLASS 的 Ampere 风格 GEMM 所针对的架构，
+> 所以阶段 B、C 以它们为主线。（据 GA10x 白皮书推算，GeForce Ampere 的 FP16 张量核心在 FP32 累加下峰值约为 FP32 CUDA core 的 2 倍，待用 cuBLAS 实测确认。）
 
 ## 运行
 ```bash

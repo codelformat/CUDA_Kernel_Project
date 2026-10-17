@@ -10,9 +10,11 @@
 #                                     例: scripts/remote.sh sh python ref/gen_data.py 4096 1024
 #   scripts/remote.sh fetch           把远程 results/ logs/ 里的 .ncu-rep .nsys-rep .log .csv 拉回本地
 #   scripts/remote.sh status|up|down  查看 / 建立 / 关闭那一条被复用的 SSH 连接
+#   scripts/remote.sh info            打印当前选中的机器档案与解析出的 主机 / 目录 / conda 环境（不连接）
 #
 # 环境变量（都有默认值）:
-#   REMOTE_HOST=4p6000   REMOTE_DIR=/home/guansheng/workspace/CUDA_Kernel_Project   CONDA_ENV=omni
+#   MACHINE=omen         选机器档案 machines/<名字>.env（默认 omen；旧服务器是 MACHINE=rtxpro6000）
+#   REMOTE_HOST / REMOTE_DIR / CONDA_ENV   默认取自机器档案，设置同名环境变量可覆盖
 #   SSH_PERSIST=8h       主连接空闲多久后自动断开
 #   SYNC_DELETE=1        同步时删除远程多出来的文件（默认不删，更安全）
 #   NO_SYNC=1            跳过同步
@@ -23,9 +25,11 @@
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-REMOTE_HOST="${REMOTE_HOST:-4p6000}"
-REMOTE_DIR="${REMOTE_DIR:-/home/guansheng/workspace/CUDA_Kernel_Project}"
-CONDA_ENV="${CONDA_ENV:-omni}"
+# 机器档案 machines/<名字>.env 提供 REMOTE_HOST / REMOTE_DIR / CONDA_ENV 的默认值（同名环境变量优先）
+MACHINE="${MACHINE:-omen}"
+PROFILE="$ROOT/machines/$MACHINE.env"
+[ -f "$PROFILE" ] || { echo "[remote] 找不到机器档案 $PROFILE（可选: $(ls "$ROOT"/machines/*.env 2>/dev/null | xargs -n1 basename | sed 's/\.env$//' | tr '\n' ' ')）" >&2; exit 2; }
+eval "$( . "$PROFILE"; printf 'REMOTE_HOST=%q REMOTE_DIR=%q CONDA_ENV=%q' "$REMOTE_HOST" "$REMOTE_DIR" "$CONDA_ENV" )"
 SSH_PERSIST="${SSH_PERSIST:-8h}"
 
 mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh" 2>/dev/null || true
@@ -65,7 +69,7 @@ do_sync() {
 remote_exec() {
   local cmd env_prefix="" v script b64
   cmd="$(printf '%q ' "$@")"
-  for v in GPU_INDEX NVCC_FLAGS FLUSH_L2 PEAK_GBPS; do
+  for v in GPU_INDEX NVCC_FLAGS NCU_EXTRA FLUSH_L2 PEAK_GBPS PEAK_TFLOPS; do
     if [ -n "${!v:-}" ]; then env_prefix="$env_prefix$v=$(printf '%q' "${!v}") "; fi
   done
   read -r -d '' script <<EOF || true
@@ -104,6 +108,7 @@ do_fetch() {
 
 case "${1:-}" in
   ""|-h|--help|help) sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  info)   echo "MACHINE=$MACHINE  REMOTE_HOST=$REMOTE_HOST  REMOTE_DIR=$REMOTE_DIR  CONDA_ENV=$CONDA_ENV" ;;
   up)     ensure_master; echo "[remote] 主连接已就绪" >&2 ;;
   status) if ssh "${SSH_OPTS[@]}" -O check "$REMOTE_HOST" 2>&1; then :; else echo "[remote] 当前没有活动的主连接" >&2; fi ;;
   down)   ssh "${SSH_OPTS[@]}" -O exit "$REMOTE_HOST" 2>&1 || echo "[remote] 当前没有活动的主连接" >&2 ;;

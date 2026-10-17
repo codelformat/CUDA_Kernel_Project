@@ -6,6 +6,7 @@
 #   run : 编译 + 运行（默认）      nsys: + Nsight Systems 时间线
 #   ncu : + Nsight Compute         all : nsys + ncu
 # 环境变量: GPU_INDEX=<n>  指定显卡（默认自动选最空闲的）   NVCC_FLAGS="..."  追加 nvcc 选项
+#           NCU_EXTRA="--clock-control none"  追加 ncu 选项（想让耗时和真实运行一致就加它）
 set -eo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -45,6 +46,19 @@ CC=$(nvidia-smi -i "$GPU_INDEX" --query-gpu=compute_cap --format=csv,noheader 2>
 case "$CC" in ''|*[!0-9]*) CC="";; esac
 read -r USED UTIL < <(nvidia-smi -i "$GPU_INDEX" --query-gpu=memory.used,utilization.gpu --format=csv,noheader,nounits | tr -d ',')
 echo "-> 使用 GPU $GPU_INDEX: $GPU_NAME  (sm_${CC:-?})  已用显存 ${USED} MiB, 利用率 ${UTIL}%"
+# 按 GPU 型号自动选机器档案 machines/*.env，导出该机器的编号与理论峰值（结果里会带上）
+MATCHED=""
+for f in "$ROOT"/machines/*.env; do
+  [ -f "$f" ] || continue
+  m=$( . "$f" >/dev/null 2>&1; echo "${GPU_MATCH:-}" )
+  if [ -n "$m" ] && [[ "$GPU_NAME" == *"$m"* ]]; then . "$f"; MATCHED="$f"; break; fi
+done
+if [ -n "$MATCHED" ]; then
+  echo "-> 机器档案: $(basename "$MATCHED")   峰值: ${PEAK_GBPS:-?} GB/s, ${PEAK_TFLOPS:-?} TFLOPS(FP32)"
+  export MACHINE_ID PEAK_GBPS PEAK_TFLOPS
+else
+  echo "!! machines/ 里没有匹配 \"$GPU_NAME\" 的档案：不会显示相对峰值的百分比（可手动设 PEAK_GBPS / PEAK_TFLOPS）"
+fi
 if [ "${USED:-0}" -gt 500 ] || [ "${UTIL:-0}" -gt 10 ]; then
   echo "!! 这块卡正被别人使用，计时结果会失真（可用 GPU_INDEX=<n> 换卡，或稍后再测）"
 fi
@@ -86,7 +100,7 @@ if [ "$MODE" = ncu ] || [ "$MODE" = all ]; then
   echo; echo "== Nsight Compute (set=$NCU_SET count=$NCU_COUNT kernel=${KERNEL:-<全部>}) =="
   NCU=$(find_tool ncu "$CUDA_ROOT/nsight-compute-*/ncu" "/opt/nvidia/nsight-compute/*/ncu")
   if [ -z "$NCU" ]; then echo "(没有找到 ncu，跳过)"; else
-    "$NCU" --set "$NCU_SET" ${KERNEL:+-k "regex:$KERNEL"} -c "$NCU_COUNT" -o "$OUT/ncu" --force-overwrite "$BIN" $ARGS
+    "$NCU" --set "$NCU_SET" ${NCU_EXTRA:-} ${KERNEL:+-k "regex:$KERNEL"} -c "$NCU_COUNT" -o "$OUT/ncu" --force-overwrite "$BIN" $ARGS
     "$NCU" --import "$OUT/ncu.ncu-rep" --page details | sed -n 1,200p || true
   fi
 fi
