@@ -29,7 +29,7 @@ GPU_INDEX=1 scripts/run.sh kernels/01_naive.cu                    # 多卡机器
 
 ## 从本地一键远程运行（推荐）
 本地改代码，用 `scripts/remote.sh` 同步到 GPU 服务器、远程编译运行，输出实时打印回本地终端。
-需要：`~/.ssh/config` 里有免密登录的主机别名（默认 `4p6000`）。所有 ssh / rsync 复用**同一条** SSH 连接（ControlMaster），对服务器只有一次登录。
+需要：`~/.ssh/config` 里有免密登录的主机别名（主机别名见 `machines/*.env`，默认 `omen`）。所有 ssh / rsync 复用**同一条** SSH 连接（ControlMaster），对服务器只有一次登录。
 
 ```bash
 scripts/remote.sh kernels/01_naive.cu                 # 同步 + 远程 scripts/run.sh

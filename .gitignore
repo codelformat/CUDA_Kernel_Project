@@ -25,3 +25,4 @@ __pycache__/
 .fuse_hidden*
 .vscode/
 .idea/
+env_report.txt
