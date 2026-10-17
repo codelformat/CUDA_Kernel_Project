@@ -2,9 +2,10 @@
 # 在【当前机器】上编译并运行 CUDA 程序，可选 Nsight 分析。无需 ssh / Slurm：
 # 把仓库 clone 到有 GPU 的节点上，在仓库根目录直接运行。
 #
-# 用法: scripts/run.sh kernels/xxx.cu [-m run|nsys|ncu|all] [-a "程序参数"] [-k ncu核函数名正则] [-c ncu抓取次数] [-s ncu set]
+# 用法: scripts/run.sh kernels/xxx.cu [-m run|nsys|ncu|all|quick] [-a "程序参数"] [-k ncu核函数名正则] [-c ncu抓取次数] [-s ncu set]
 #   run : 编译 + 运行（默认）      nsys: + Nsight Systems 时间线
 #   ncu : + Nsight Compute         all : nsys + ncu
+#   quick: 运行后用 scripts/ncu_quick.sh 打印一张常用指标表（几秒；用 -k 指定 kernel 名正则，默认取第一个 kernel）
 # 环境变量: GPU_INDEX=<n>  指定显卡（默认自动选最空闲的）   NVCC_FLAGS="..."  追加 nvcc 选项
 #           NCU_EXTRA="--clock-control none"  追加 ncu 选项（想让耗时和真实运行一致就加它）
 set -eo pipefail
@@ -21,7 +22,7 @@ while getopts "m:a:k:c:s:" o; do
   esac
 done
 [ -f "$SRC" ] || { echo "找不到 ${SRC}（路径相对仓库根目录）"; exit 2; }
-case "$MODE" in run|nsys|ncu|all) ;; *) echo "-m 只能是 run|nsys|ncu|all"; exit 2;; esac
+case "$MODE" in run|nsys|ncu|all|quick) ;; *) echo "-m 只能是 run|nsys|ncu|all|quick"; exit 2;; esac
 command -v nvcc >/dev/null 2>&1 || { echo "PATH 里没有 nvcc"; exit 1; }
 command -v nvidia-smi >/dev/null 2>&1 || { echo "找不到 nvidia-smi：这台机器没有 GPU 驱动？"; exit 1; }
 
@@ -86,6 +87,11 @@ find_tool() {   # find_tool 名字 glob...
   return 0
 }
 CUDA_ROOT=$(dirname "$(dirname "$(command -v nvcc)")")
+
+if [ "$MODE" = quick ]; then
+  echo; echo "== ncu 快速指标（kernel 正则: ${KERNEL:-.}）=="
+  "$ROOT/scripts/ncu_quick.sh" "$BIN" "${KERNEL:-.}" $ARGS || true
+fi
 
 if [ "$MODE" = nsys ] || [ "$MODE" = all ]; then
   echo; echo "== Nsight Systems =="
