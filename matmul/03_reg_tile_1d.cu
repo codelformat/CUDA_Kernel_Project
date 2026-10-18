@@ -39,19 +39,32 @@ __global__ void gemm_reg1d(const float* A, const float* B, float* C, int M, int 
 
     for (int t = 0; t < K; t += BK) {
         // TODO 1: 搬 A：As[aRow][aCol] = A 小块里第 aRow 行、第 (t + aCol) 列的元素（用移动后的 A 指针，行长是 K）
+        As[aRow][aCol] = A[aRow * K + t + aCol];
 
         // TODO 2: 搬 B：Bs[bRow][bCol] = B 第 (t + bRow) 行、第 bCol 列的元素（用移动后的 B 指针，行长是 N）
+        Bs[bRow][bCol] = B[(t + bRow) * N + bCol];
 
         // TODO 3: 同步
+        __syncthreads();
 
         // TODO 4: 对 kk = 0..BK-1：
         //           先把 As[ty][kk] 读进一个寄存器变量 a，
         //           再对 j = 0..TN-1：acc[j] += a * Bs[kk][tx * TN + j]
+        for (int kk = 0; kk < BK; ++kk) {
+            float a = As[ty][kk];
+            for (int j = 0; j < TN; ++j) {
+                acc[j] += a * Bs[kk][tx * TN + j];
+            }
+        }
 
         // TODO 5: 同步
+        __syncthreads();
     }
 
     // TODO 6: 写回 TN 个结果：C 小块第 ty 行、第 tx*TN + j 列（j = 0..TN-1），行长是 N
+    for (int j = 0; j < TN; ++j) {
+        C[ty * N + tx * TN + j] = acc[j];
+    }
 }
 // ========================================================================
 
