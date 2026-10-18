@@ -39,22 +39,54 @@ __global__ void gemm_reg2d(const float* A, const float* B, float* C, int M, int 
         // TODO 1: 搬 A 小块（128×8 = 1024 个数，每个线程搬 4 个）。
         //   对 i = 0..3：idx = tid + i * NTHREADS；r = idx / BK；c = idx % BK；
         //               As[r][c] = A 第 r 行、第 (t + c) 列（行长 K）
-
+        for (int i = 0; i < 4; ++i) {
+            int idx = tid + i * NTHREADS;
+            int r = idx / BK;
+            int c = idx % BK;
+            As[r][c] = A[r * K + t + c];
+        }
+        
         // TODO 2: 搬 B 小块（8×128 = 1024 个数，每个线程搬 4 个）。
         //   对 i = 0..3：idx = tid + i * NTHREADS；r = idx / BN；c = idx % BN；
         //               Bs[r][c] = B 第 (t + r) 行、第 c 列（行长 N）
+        for (int i = 0; i < 4; ++i) {
+            int idx = tid + i * NTHREADS;
+            int r = idx / BN;
+            int c = idx % BN;
+            Bs[r][c] = B[(t + r) * N + c];
+        }
 
         // TODO 3: 同步
+        __syncthreads();
 
         // TODO 4: 对 kk = 0..BK-1：
         //   (a) 把 8 个 A 读进寄存器：regM[i] = As[ty*TM + i][kk]，i = 0..TM-1
         //   (b) 把 8 个 B 读进寄存器：regN[j] = Bs[kk][tx*TN + j]，j = 0..TN-1
         //   (c) 两两相乘累加（外积）：acc[i][j] += regM[i] * regN[j]
+        for (int kk = 0; kk < BK; ++kk) {
+            for (int i = 0; i < TM; ++i) {
+                regM[i] = As[ty * TM + i][kk];
+            }
+            for (int j = 0; j < TN; ++j) {
+                regN[j] = Bs[kk][tx * TN + j];
+            }
+            for (int i = 0; i < TM; ++i) {
+                for (int j = 0; j < TN; ++j) {
+                    acc[i][j] += regM[i] * regN[j];
+                }
+            }
+        }
 
         // TODO 5: 同步
+        __syncthreads();
     }
 
     // TODO 6: 写回 64 个结果：C 小块第 (ty*TM + i) 行、第 (tx*TN + j) 列 = acc[i][j]（行长 N）
+    for (int i = 0; i < TM; ++i) {
+        for (int j = 0; j < TN; ++j) {
+            C[(ty * TM + i) * N + (tx * TN + j)] = acc[i][j];
+        }
+    }
 }
 // ========================================================================
 
