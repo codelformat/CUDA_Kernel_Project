@@ -21,17 +21,27 @@ __global__ void gemm_smem(const float* A, const float* B, float* C, int M, int N
     float sum = 0.0f;
     for (int t = 0; t < K; t += TILE) {
         // TODO 1: 把 A[row][t + tx] 搬到 As[ty][tx]；越界（row >= M 或 t + tx >= K）就填 0。
+        As[ty][tx] = (row < M && t + tx < K) ? A[row * K + (t + tx)] : 0.0f;
 
         // TODO 2: 把 B[t + ty][col] 搬到 Bs[ty][tx]；越界（t + ty >= K 或 col >= N）就填 0。
+        Bs[ty][tx] = (t + ty < K && col < N) ? B[(t + ty) * N + col] : 0.0f;
 
         // TODO 3: 等 block 里所有线程都搬完。
+        __syncthreads();
 
         // TODO 4: 用共享内存里的两个小块累加：kk 从 0 到 TILE-1，sum += A 小块第 ty 行第 kk 个 × B 小块第 kk 行第 tx 个。
+        for (int kk = 0; kk < TILE; ++kk) {
+            sum += As[ty][kk] * Bs[kk][tx];
+        }
 
         // TODO 5: 再等一次所有线程。（为什么需要这第二次同步？）
+        __syncthreads();
     }
 
     // TODO 6: 只有不越界的线程写回 C[row][col]。
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
+    }
 }
 // ========================================================================
 
