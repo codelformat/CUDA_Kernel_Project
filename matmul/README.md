@@ -29,6 +29,14 @@ nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高�
 > 注：sm_86（Ampere）的张量核心指令就是 `mma.sync`，配合 `ldmatrix` 和 `cp.async`，也是 CUTLASS 的 Ampere 风格 GEMM 所针对的架构，
 > 所以阶段 B、C 以它们为主线。（据 GA10x 白皮书推算，GeForce Ampere 的 FP16 张量核心在 FP32 累加下峰值约为 FP32 CUDA core 的 2 倍，待用 cuBLAS 实测确认。）
 
+## 进度
+| 课 | 内容 | 机器 | 最好结果（1024³，相对 cuBLAS） |
+|---|---|---|---|
+| 1–2 | naive；线程映射与合并访存 | 机器 B，CUDA 12.4 | 11.5% |
+| 3 | 共享内存分块（进行中） | 机器 B，CUDA 12.4 | — |
+
+详细数据与分析见 [RESULTS.md](RESULTS.md)。
+
 ## 运行
 ```bash
 scripts/run.sh matmul/01_naive.cu -a "4096 4096 4096"      # run.sh 会自动链接 cuBLAS

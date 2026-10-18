@@ -18,7 +18,9 @@ sm__warps_active.avg.pct_of_peak_sustained_active,\
 smsp__inst_executed.sum,smsp__inst_executed_op_global_ld.sum,\
 l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum,l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum,\
 l1tex__t_requests_pipe_lsu_mem_global_op_st.sum,l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum,\
-l1tex__t_sector_hit_rate.pct,lts__t_sector_hit_rate.pct"
+l1tex__t_sector_hit_rate.pct,lts__t_sector_hit_rate.pct,\
+smsp__sass_thread_inst_executed_op_ffma_pred_on.sum,smsp__inst_executed_op_shared_ld.sum,\
+l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
 METRICS="${NCU_METRICS:-$DEFAULT_METRICS}"
 RAW=$(mktemp); trap 'rm -f "$RAW"' EXIT
 ncu --csv --clock-control none -k "regex:$KRE" -c "${NCU_COUNT:-1}" --metrics "$METRICS" "$BIN" "$@" >"$RAW" 2>&1 || true
@@ -49,6 +51,11 @@ for kind, tag in (("ld", "load"), ("st", "store")):
     req = g(f"l1tex__t_requests_pipe_lsu_mem_global_op_{kind}.sum")
     sec = g(f"l1tex__t_sectors_pipe_lsu_mem_global_op_{kind}.sum")
     if req and sec: print(f"\n>> 全局 {tag}：每个 request 平均 {sec / req:.2f} 个 sector（连续 4 B/线程 = 4；全部同地址 = 1；各踩一条线 = 32）")
+ffma = g("smsp__sass_thread_inst_executed_op_ffma_pred_on.sum")
+gld = g("smsp__inst_executed_op_global_ld.sum"); sld = g("smsp__inst_executed_op_shared_ld.sum")
+if ffma:
+    wf = ffma / 32
+    print(f">> warp 级 FFMA ≈ {wf:,.0f} 条；每条 FFMA 配 {(gld or 0) / wf:.3f} 条全局读、{(sld or 0) / wf:.3f} 条共享内存读")
 clk = vals.get("smsp__cycles_elapsed.avg.per_second")
 if clk:
     ghz = clk[0] if "nsecond" in clk[1] else clk[0] / 1e9   # 单位可能是 cycle/nsecond（即 GHz）或 cycle/second
