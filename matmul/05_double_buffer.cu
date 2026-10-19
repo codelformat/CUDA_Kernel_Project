@@ -35,6 +35,18 @@ __global__ void gemm_db(const float* A, const float* B, float* C, int M, int N, 
     // ---- 开场：把第 0 块搬进第 0 份缓冲（和 v4 的 TODO 1、2 一样，只是写进 As[0]、Bs[0]）----
     // TODO 1: 对 i = 0..LOADS_A-1：idx = tid + i*NTHREADS; r = idx/BK; c = idx%BK; As[0][r][c] = A[r*K + c]
     //         对 i = 0..LOADS_B-1：idx = tid + i*NTHREADS; r = idx/BN; c = idx%BN; Bs[0][r][c] = B[r*N + c]
+    for (int i = 0; i < LOADS_A; ++i) {
+        int idx = tid + i * NTHREADS;
+        int r = idx / BK;
+        int c = idx % BK;
+        As[0][r][c] = A[r * K + c];
+    }
+    for (int i = 0; i < LOADS_B; ++i) {
+        int idx = tid + i * NTHREADS;
+        int r = idx / BN;
+        int c = idx % BN;
+        Bs[0][r][c] = B[r * N + c];
+    }
 
     __syncthreads();
 
@@ -45,16 +57,64 @@ __global__ void gemm_db(const float* A, const float* B, float* C, int M, int N, 
         // TODO 2: 如果 has_next：发出下一块（起点 t + BK）的显存读，结果只放进 ldA[i]、ldB[i]，先不要写共享内存。
         //         A：ldA[i] = A 第 r 行、第 (t + BK + c) 列；B：ldB[i] = B 第 (t + BK + r) 行、第 c 列
         //         （r、c 的算法和 TODO 1 一样）
+        if (has_next) {
+            for (int i = 0; i < LOADS_A; ++i) {
+                int idx = tid + i * NTHREADS;
+                int r = idx / BK;
+                int c = idx % BK;
+                ldA[i] = A[r * K + (t + BK) + c];
+            }
+            for (int i = 0; i < LOADS_B; ++i) {
+                int idx = tid + i * NTHREADS;
+                int r = idx / BN;
+                int c = idx % BN;
+                ldB[i] = B[(t + BK + r) * N + c];
+            }
+        }
 
         // TODO 3: 用 As[cur]、Bs[cur] 计算这一块：和 v4 的 TODO 4 完全一样，只是数组多了一维 [cur]
+        for (int kk = 0; kk < BK; ++kk) {
+            for (int i = 0; i < TM; ++i) {
+                regM[i] = As[cur][ty * TM + i][kk];
+            }
+            for (int j = 0; j < TN; ++j) {
+                regN[j] = Bs[cur][kk][tx * TN + j];
+            }
+            for (int i = 0; i < TM; ++i) {
+                for (int j = 0; j < TN; ++j) {
+                    acc[i][j] += regM[i] * regN[j];
+                }
+            }
+        }
 
         // TODO 4: 如果 has_next：把 ldA[i]、ldB[i] 写进另一份缓冲 As[cur ^ 1]、Bs[cur ^ 1] 的对应位置
         //         （cur ^ 1 是"异或 1"：0 变 1，1 变 0）
+        if (has_next) {
+            for (int i = 0; i < LOADS_A; ++i) {
+                int idx = tid + i * NTHREADS;
+                int r = idx / BK;
+                int c = idx % BK;
+                As[cur ^ 1][r][c] = ldA[i];
+            }
+            for (int i = 0; i < LOADS_B; ++i) {
+                int idx = tid + i * NTHREADS;
+                int r = idx / BN;
+                int c = idx % BN;
+                Bs[cur ^ 1][r][c] = ldB[i];
+            }
+        }
 
         // TODO 5: 同步一次，然后切换：cur ^= 1
+        __syncthreads();
+        cur ^= 1;
     }
 
     // TODO 6: 写回 64 个结果（和 v4 一样）
+    for (int i = 0; i < TM; ++i) {
+        for (int j = 0; j < TN; ++j) {
+            C[(ty * TM + i) * N + (tx * TN + j)] = acc[i][j];
+        }
+    }
 }
 // ========================================================================
 
