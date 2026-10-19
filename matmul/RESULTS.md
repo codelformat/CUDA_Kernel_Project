@@ -105,3 +105,24 @@
 - 共享内存读 / FFMA 降到 0.06，访存不再是瓶颈：L1/TEX 只有 30%。
 - **占用率只有 16.6%，却快了 2 倍**：每个线程每个 kk 有 64 条互不依赖的 FFMA，同一个 warp 自己就能连续发射（指令级并行，ILP），不需要很多 warp 轮流来隐藏延迟。
 - 现在没有任何单元满载（L1/TEX 30%、SM 24%、DRAM 6%）→ 瓶颈变成**延迟**：每步"搬 → 同步 → 算 → 同步"串行执行，搬运时计算单元空等，而每个 SM 只有 8 个 warp，补不上空档（推断，待用 stall reason 验证）。
+
+### v4 的瓶颈分析：warp 在等什么（ncu，1024³）
+
+grid 只有 8×8 = 64 个 block，每个 SM 一次只放得下 1 个 → 第一轮 58 个、第二轮只剩 6 个，52 个 SM 空等（尾部效应 / wave quantization，有效利用约 64 / (2×58) = 55%）。
+换成 2048³（256 个 block，约 4.4 轮）后，相对 cuBLAS 从约 40% 升到 **50.9%**（2.648 ms vs cuBLAS 1.349 ms），与预测一致。
+
+`Warp Cycles Per Issued Instruction` = 4.72：每个调度器只有 2 个 warp，平均每周期只发出约 0.42 条指令。按原因分解（每发射一条指令平均等待的周期）：
+
+| 原因 | 值 | 含义 |
+|---|---|---|
+| selected | 1.00 | 发射本身（基线） |
+| **long_scoreboard** | **0.90** | 等显存读回来（把读到的值写进共享内存时卡住） |
+| not_selected | 0.64 | 另一个 warp 被选中（不算真正的等待） |
+| short_scoreboard | 0.54 | 等共享内存读回来 |
+| lg_throttle | 0.40 | 全局读指令排队（每个线程每步连发 8 条） |
+| dispatch_stall | 0.40 | 分派阻塞 |
+| barrier | 0.26 | 等 `__syncthreads()` |
+| wait / mio_throttle / math_pipe_throttle | 0.23 / 0.18 / 0.05 | 固定延迟 / 共享内存通道排队 / 计算单元忙 |
+
+**结论**：最大的真实等待是显存读（long_scoreboard + lg_throttle ≈ 1.3），算力几乎不忙（math_pipe_throttle 0.05）。
+"搬"和"算"没有重叠，是下一步（双缓冲 / 预取）要解决的问题。
