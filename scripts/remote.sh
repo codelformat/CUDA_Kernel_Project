@@ -115,6 +115,8 @@ case "${1:-}" in
   sync)   shift; ensure_master; do_sync "$@" ;;
   fetch)  ensure_master; do_fetch ;;
   sh)     shift; [ $# -ge 1 ] || { echo "用法: scripts/remote.sh sh <命令...>" >&2; exit 2; }
-          ensure_master; do_sync; remote_exec "$@" ;;
+          ensure_master; do_sync
+          # 只给一个参数时当作一整行 shell 命令（支持 $(...)、管道、通配符）；多个参数时逐个原样传递
+          if [ $# -eq 1 ]; then remote_exec bash -c "$1"; else remote_exec "$@"; fi ;;
   *)      ensure_master; do_sync; remote_exec scripts/run.sh "$@" ;;
 esac
