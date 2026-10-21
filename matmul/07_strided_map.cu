@@ -19,7 +19,12 @@
 #define NTHREADS ((BM / TM) * (BN / TN))   // 256
 #define HALF 64                            // 两组之间的间隔
 
-__global__ void gemm_strided(const float* A, const float* B, float* C, int M, int N, int K) {
+// 实验开关：要求编译器保证每个 SM 至少能同时放 MIN_BLOCKS 个 block（会限制每个线程的寄存器数）
+#ifndef MIN_BLOCKS
+#define MIN_BLOCKS 1
+#endif
+
+__global__ void __launch_bounds__(NTHREADS, MIN_BLOCKS) gemm_strided(const float* A, const float* B, float* C, int M, int N, int K) {
     __shared__ __align__(16) float AsT[2][BK][BM];
     __shared__ __align__(16) float Bs[2][BK][BN];
 
@@ -59,12 +64,25 @@ __global__ void gemm_strided(const float* A, const float* B, float* C, int M, in
             // TODO 1: 读 8 个 A 到 regM：
             //   regM[0..3] = AsT[cur][kk][ty*4 + 0..3]          （一个 float4）
             //   regM[4..7] = AsT[cur][kk][HALF + ty*4 + 0..3]   （另一个 float4）
+            float4 vA = *reinterpret_cast<const float4*>(&AsT[cur][kk][ty * 4]);
+            regM[0] = vA.x; regM[1] = vA.y; regM[2] = vA.z; regM[3] = vA.w;
+            vA = *reinterpret_cast<const float4*>(&AsT[cur][kk][HALF + ty * 4]);
+            regM[4] = vA.x; regM[5] = vA.y; regM[6] = vA.z; regM[7] = vA.w;
 
             // TODO 2: 读 8 个 B 到 regN：
             //   regN[0..3] = Bs[cur][kk][tx*4 + 0..3]
             //   regN[4..7] = Bs[cur][kk][HALF + tx*4 + 0..3]
+            float4 vB = *reinterpret_cast<const float4*>(&Bs[cur][kk][tx * 4]);
+            regN[0] = vB.x; regN[1] = vB.y; regN[2] = vB.z; regN[3] = vB.w;
+            vB = *reinterpret_cast<const float4*>(&Bs[cur][kk][HALF + tx * 4]);
+            regN[4] = vB.x; regN[5] = vB.y; regN[6] = vB.z; regN[7] = vB.w;
 
             // TODO 3: 外积 acc[i][j] += regM[i] * regN[j]（和 v6 一样）
+            for (int i = 0; i < TM; ++i) {
+                for (int j = 0; j < TN; ++j) {
+                    acc[i][j] += regM[i] * regN[j];
+                }
+            }
         }
         // ========================================================================
 
@@ -85,6 +103,13 @@ __global__ void gemm_strided(const float* A, const float* B, float* C, int M, in
     //                         把 acc[i][4..7] 打包成一个 float4 写到列 HALF + tx*4 处。
     //   （float4 可以这样构造：make_float4(a, b, c, d)）
     // ========================================================================
+    for (int i = 0; i < TM; ++i) {
+        int row = (i < 4) ? (ty * 4 + i) : (HALF + ty * 4 + (i - 4));
+        float4 vC0 = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
+        float4 vC1 = make_float4(acc[i][4], acc[i][5], acc[i][6], acc[i][7]);
+        *reinterpret_cast<float4*>(&C[row * N + tx * 4]) = vC0;
+        *reinterpret_cast<float4*>(&C[row * N + HALF + tx * 4]) = vC1;
+    }
 }
 
 void launch(const float* A, const float* B, float* C, int M, int N, int K) {
