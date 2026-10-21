@@ -13,7 +13,9 @@
 
 #define BM 128
 #define BN 128
-#define BK 8
+#ifndef BK
+#define BK 8                               // 实验开关：-DBK=16
+#endif
 #define TM 8
 #define TN 8
 #define NTHREADS ((BM / TM) * (BN / TN))   // 256
@@ -35,28 +37,40 @@ __global__ void __launch_bounds__(NTHREADS, MIN_BLOCKS) gemm_strided(const float
     B += blockIdx.x * BN;
     C += blockIdx.y * BM * N + blockIdx.x * BN;
 
-    const int aRow = tid / 2, aCol = (tid % 2) * 4;
-    const int bRow = tid / 32, bCol = (tid % 32) * 4;
+    // 搬运分工（支持 BK = 8 或 16）：A 小块每行 BK/4 个 float4，B 小块每行 BN/4 个 float4；
+    // 每个线程每步搬 LA 个 A 的 float4、LB 个 B 的 float4（BK=8 时都是 1，BK=16 时都是 2）
+    constexpr int LA = BM * BK / 4 / NTHREADS;
+    constexpr int LB = BK * BN / 4 / NTHREADS;
+    int aRow[LA], aCol[LA], bRow[LB], bCol[LB];
+    #pragma unroll
+    for (int i = 0; i < LA; ++i) { int idx = tid + i * NTHREADS; aRow[i] = idx / (BK / 4); aCol[i] = (idx % (BK / 4)) * 4; }
+    #pragma unroll
+    for (int i = 0; i < LB; ++i) { int idx = tid + i * NTHREADS; bRow[i] = idx / (BN / 4); bCol[i] = (idx % (BN / 4)) * 4; }
 
     float acc[TM][TN] = {{0.0f}};
     float regM[TM], regN[TN];
-    float4 ldA, ldB;
+    float4 ldA[LA], ldB[LB];
 
     // ---- 开场：第 0 块（同 v6）----
-    {
-        float4 vA = *reinterpret_cast<const float4*>(&A[aRow * K + aCol]);
-        AsT[0][aCol + 0][aRow] = vA.x; AsT[0][aCol + 1][aRow] = vA.y;
-        AsT[0][aCol + 2][aRow] = vA.z; AsT[0][aCol + 3][aRow] = vA.w;
-        *reinterpret_cast<float4*>(&Bs[0][bRow][bCol]) = *reinterpret_cast<const float4*>(&B[bRow * N + bCol]);
+    #pragma unroll
+    for (int i = 0; i < LA; ++i) {
+        float4 vA = *reinterpret_cast<const float4*>(&A[aRow[i] * K + aCol[i]]);
+        AsT[0][aCol[i] + 0][aRow[i]] = vA.x; AsT[0][aCol[i] + 1][aRow[i]] = vA.y;
+        AsT[0][aCol[i] + 2][aRow[i]] = vA.z; AsT[0][aCol[i] + 3][aRow[i]] = vA.w;
     }
+    #pragma unroll
+    for (int i = 0; i < LB; ++i)
+        *reinterpret_cast<float4*>(&Bs[0][bRow[i]][bCol[i]]) = *reinterpret_cast<const float4*>(&B[bRow[i] * N + bCol[i]]);
     __syncthreads();
 
     int cur = 0;
     for (int t = 0; t < K; t += BK) {
         const bool has_next = (t + BK < K);
         if (has_next) {   // 预取下一块（同 v6）
-            ldA = *reinterpret_cast<const float4*>(&A[aRow * K + (t + BK) + aCol]);
-            ldB = *reinterpret_cast<const float4*>(&B[(t + BK + bRow) * N + bCol]);
+            #pragma unroll
+            for (int i = 0; i < LA; ++i) ldA[i] = *reinterpret_cast<const float4*>(&A[aRow[i] * K + (t + BK) + aCol[i]]);
+            #pragma unroll
+            for (int i = 0; i < LB; ++i) ldB[i] = *reinterpret_cast<const float4*>(&B[(t + BK + bRow[i]) * N + bCol[i]]);
         }
 
         // ============================== 你要写的部分 ==============================
@@ -87,9 +101,13 @@ __global__ void __launch_bounds__(NTHREADS, MIN_BLOCKS) gemm_strided(const float
         // ========================================================================
 
         if (has_next) {   // 写进另一份缓冲（同 v6）
-            AsT[cur ^ 1][aCol + 0][aRow] = ldA.x; AsT[cur ^ 1][aCol + 1][aRow] = ldA.y;
-            AsT[cur ^ 1][aCol + 2][aRow] = ldA.z; AsT[cur ^ 1][aCol + 3][aRow] = ldA.w;
-            *reinterpret_cast<float4*>(&Bs[cur ^ 1][bRow][bCol]) = ldB;
+            #pragma unroll
+            for (int i = 0; i < LA; ++i) {
+                AsT[cur ^ 1][aCol[i] + 0][aRow[i]] = ldA[i].x; AsT[cur ^ 1][aCol[i] + 1][aRow[i]] = ldA[i].y;
+                AsT[cur ^ 1][aCol[i] + 2][aRow[i]] = ldA[i].z; AsT[cur ^ 1][aCol[i] + 3][aRow[i]] = ldA[i].w;
+            }
+            #pragma unroll
+            for (int i = 0; i < LB; ++i) *reinterpret_cast<float4*>(&Bs[cur ^ 1][bRow[i]][bCol[i]]) = ldB[i];
         }
         __syncthreads();
         cur ^= 1;
