@@ -41,10 +41,11 @@ h1{font-size:18px;margin:0;font-weight:700}
     <button id="bNext" aria-label="下一段">下一段 ⏭</button>
     <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="进度">
     <span class="time" id="tm">0:00 / 0:00</span>
+    <button id="bMute" aria-label="声音开关">声音：开</button>
     <select id="spd" aria-label="速度"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
   </div>
   <div class="chapters" id="chs"></div>
-  <p class="note">字幕即旁白，速度按阅读时间设定；看不完可以暂停或调慢。键盘：空格 播放/暂停，← → 上一段/下一段。数据来自机器 B（RTX 3080 Ti Laptop，sm_86，CUDA 12.4），与 matmul/RESULTS.md 一致。</p>
+  <p class="note">配音由离线语音合成生成，字幕与配音同步；看不完可以暂停或调慢。键盘：空格 播放/暂停，← → 上一段/下一段。数据来自机器 B（RTX 3080 Ti Laptop，sm_86，CUDA 12.4），与 matmul/RESULTS.md 一致。</p>
 </div>
 
 <script>
@@ -454,8 +455,12 @@ chapter('10 · 两次"变慢"的实验与总结',[
 ]);
 
 // ======================= 时间线与播放 =======================
-const BEATS=[];let total=0;
-CH.forEach((ch,ci)=>ch.beats.forEach((b,bi)=>{const n=[...b.cap].length;const dur=Math.max(9,Math.min(70,n/5+4));BEATS.push({...b,ci,bi,start:total,dur});total+=dur;}));
+// 每段时长：有配音时 = 配音长度 + 首尾留白；否则按阅读速度估算
+const DUR=[18.87, 30.83, 21.19, 34.86, 28.27, 37.45, 35.71, 32.66, 29.52, 39.83, 28.61, 29.87, 37.63, 39.38, 33.13, 34.3, 37.86, 40.44, 33.55, 30.02, 38.06, 33.82, 48.93, 34.53, 38.51, 45.4, 42.72, 39.14, 47.13, 41.49, 41.32, 60.37, 44.22, 46.64, 50.09, 38.3, 28.37, 45.12, 40.2, 46.16, 41.57, 43.56, 34.34, 52.33, 41.77, 41.45, 36.94, 46.35, 43.21, 34.35, 38.71, 32.04, 29.53]; // 配音长度 + 0.6 s 前导 + 1.0 s 留白
+const LEAD=0.6;
+const BEATS=[];let total=0;let gi=0;
+CH.forEach((ch,ci)=>ch.beats.forEach((b,bi)=>{const n=[...b.cap].length;const dur=DUR?DUR[gi]:Math.max(9,Math.min(70,n/5+4));BEATS.push({...b,ci,bi,start:total,dur});total+=dur;gi++;}));
+window.__CAPS=BEATS.map(b=>b.cap);
 function beatAt(t){t=clamp(t,0,total-1e-6);let lo=0,hi=BEATS.length-1;while(lo<hi){const m=(lo+hi+1)>>1;if(BEATS[m].start<=t)lo=m;else hi=m-1;}return lo;}
 function render(t){const bi=beatAt(t),b=BEATS[bi];const local=t-b.start;const p=clamp(local/(b.dur*0.85));
   ctx.setTransform(cv.width/W,0,0,cv.height/H,0,0);ctx.fillStyle=C.bg;ctx.fillRect(0,0,W,H);
@@ -471,14 +476,24 @@ let now=0,playing=false,last=0,raf=0;const $=id=>document.getElementById(id);
 const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
 function ui(){$('scrub').value=Math.round(now/total*1000);$('tm').textContent=`${fmt(now)} / ${fmt(total)}`;$('bPlay').textContent=playing?'暂停':(now>=total-0.01?'重播':'播放');
   const ci=BEATS[beatAt(now)].ci;[...$('chs').children].forEach((b,i)=>b.classList.toggle('on',i===ci));}
-function frame(ts){if(!playing)return;const dt=(ts-last)/1000;last=ts;now=Math.min(total,now+dt*parseFloat($('spd').value));render(now);ui();if(now>=total){playing=false;ui();return;}raf=requestAnimationFrame(frame);}
+// 配音：每段一个音频文件 audio/bNN.mp3，进入该段 LEAD 秒后开始播放；文件不存在时静默跳过
+const AUD=BEATS.map((b,i)=>{const a=new Audio();a.preload='none';a.src=`audio/b${String(i).padStart(2,'0')}.mp3`;a.addEventListener('error',()=>{a._bad=true;});return a;});
+let curA=-1,muted=false;
+function stopAudio(){if(curA>=0){try{AUD[curA].pause();}catch(e){}}curA=-1;}
+function syncAudio(){if(!playing||muted)return;const bi=beatAt(now);const local=now-BEATS[bi].start;
+  if(curA!==bi&&local>=LEAD){stopAudio();const a=AUD[bi];if(a._bad)return;curA=bi;a.playbackRate=parseFloat($('spd').value);
+    try{a.currentTime=Math.max(0,local-LEAD);}catch(e){} a.play().catch(()=>{});
+    const nx=AUD[bi+1];if(nx&&nx.preload!=='auto'){nx.preload='auto';try{nx.load();}catch(e){}}}}
+function frame(ts){if(!playing)return;const dt=(ts-last)/1000;last=ts;now=Math.min(total,now+dt*parseFloat($('spd').value));render(now);ui();syncAudio();if(now>=total){playing=false;ui();return;}raf=requestAnimationFrame(frame);}
 function play(){if(now>=total-0.01)now=0;playing=true;last=performance.now();raf=requestAnimationFrame(frame);ui();}
-function pause(){playing=false;cancelAnimationFrame(raf);ui();}
-function seek(t){now=clamp(t,0,total);render(now);ui();}
+function pause(){playing=false;cancelAnimationFrame(raf);stopAudio();ui();}
+function seek(t){now=clamp(t,0,total);stopAudio();render(now);ui();}
 $('bPlay').onclick=()=>playing?pause():play();
 $('bNext').onclick=()=>{const i=beatAt(now);seek(i+1<BEATS.length?BEATS[i+1].start:total);};
 $('bPrev').onclick=()=>{const i=beatAt(now);const s=BEATS[i].start;seek(now-s>1.5||i===0?s:BEATS[i-1].start);};
 $('scrub').oninput=e=>seek(e.target.value/1000*total);
+$('bMute').onclick=()=>{muted=!muted;$('bMute').textContent=muted?'声音：关':'声音：开';if(muted)stopAudio();};
+$('spd').onchange=()=>{if(curA>=0)AUD[curA].playbackRate=parseFloat($('spd').value);};
 CH.forEach((ch,ci)=>{const b=document.createElement('button');b.type='button';b.textContent=ch.name;b.onclick=()=>{seek(BEATS.find(x=>x.ci===ci).start);};$('chs').appendChild(b);});
 document.addEventListener('keydown',e=>{if(['INPUT','SELECT'].includes(e.target.tagName))return;if(e.key===' '){e.preventDefault();playing?pause():play();}else if(e.key==='ArrowRight')$('bNext').click();else if(e.key==='ArrowLeft')$('bPrev').click();});
 const start=()=>{seek(0);};
