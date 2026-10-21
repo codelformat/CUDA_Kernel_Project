@@ -35,6 +35,8 @@ nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高�
 一维/二维寄存器分块（外积）、双缓冲预取、float4 向量化、共享内存转置、消除 bank 冲突、合并写回；
 也记录了两次"按原理应该更快、实测更慢"的实验（限制寄存器换占用率、加大 BK）。详细数据见 [RESULTS.md](RESULTS.md)。
 
+动画讲解（离线打开即可播放，约 45 分钟）：[docs/gemm_v1_v7_explainer.html](docs/gemm_v1_v7_explainer.html)
+
 ## 进度
 | 课 | 内容 | 机器 | 最好结果（1024³，相对 cuBLAS） |
 |---|---|---|---|
