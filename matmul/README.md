@@ -29,6 +29,12 @@ nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高�
 > 注：sm_86（Ampere）的张量核心指令就是 `mma.sync`，配合 `ldmatrix` 和 `cp.async`，也是 CUTLASS 的 Ampere 风格 GEMM 所针对的架构，
 > 所以阶段 B、C 以它们为主线。（据 GA10x 白皮书推算，GeForce Ampere 的 FP16 张量核心在 FP32 累加下峰值约为 FP32 CUDA core 的 2 倍，待用 cuBLAS 实测确认。）
 
+## 阶段 A 一句话总结
+手写 FP32 GEMM 从最朴素的版本（cuBLAS 的 11.5%）出发，每一步用 Nsight Compute 定位瓶颈、只改一处、先预测再测量，
+经过 7 个版本把 2048³ 做到 **cuBLAS SGEMM 的 69.8%**（RTX 3080 Ti Laptop，CUDA 12.4）。用到的技巧：合并访存、共享内存分块、
+一维/二维寄存器分块（外积）、双缓冲预取、float4 向量化、共享内存转置、消除 bank 冲突、合并写回；
+也记录了两次"按原理应该更快、实测更慢"的实验（限制寄存器换占用率、加大 BK）。详细数据见 [RESULTS.md](RESULTS.md)。
+
 ## 进度
 | 课 | 内容 | 机器 | 最好结果（1024³，相对 cuBLAS） |
 |---|---|---|---|
@@ -39,6 +45,7 @@ nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高�
 | 6 | 双缓冲 / 预取 | 机器 B，CUDA 12.4 | 38.4%（2048³：51.3%） |
 | 7 | float4 显存读 + A 转置 | 机器 B，CUDA 12.4 | 53.6%（2048³：60.6%） |
 | 8 | 线程→输出映射（无 bank 冲突、合并写回） | 机器 B，CUDA 12.4 | 58.7%（2048³：69.8%） |
+| — | 实验：`__launch_bounds__`、BK=16（均无提升 → 阶段 A 结束） | 机器 B，CUDA 12.4 | — |
 
 详细数据与分析见 [RESULTS.md](RESULTS.md)。
 
