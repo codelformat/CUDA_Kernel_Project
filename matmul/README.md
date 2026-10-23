@@ -47,7 +47,8 @@ nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高�
 | 6 | 双缓冲 / 预取 | 机器 B，CUDA 12.4 | 38.4%（2048³：51.3%） |
 | 7 | float4 显存读 + A 转置 | 机器 B，CUDA 12.4 | 53.6%（2048³：60.6%） |
 | 8 | 线程→输出映射（无 bank 冲突、合并写回） | 机器 B，CUDA 12.4 | 58.7%（2048³：69.8%） |
-| — | 实验：`__launch_bounds__`、BK=16（均无提升 → 阶段 A 结束） | 机器 B，CUDA 12.4 | — |
+| — | 实验：`__launch_bounds__`、BK=16（均无提升） | 机器 B，CUDA 12.4 | — |
+| 9 | 阶段 A 补课：warp 级分块（进行中）；之后：寄存器双缓冲、AsT 写入冲突、cp.async | 机器 B，CUDA 12.4 | — |
 
 详细数据与分析见 [RESULTS.md](RESULTS.md)。
 
