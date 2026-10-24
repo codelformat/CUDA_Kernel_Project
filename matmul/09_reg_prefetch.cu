@@ -96,12 +96,21 @@ __global__ void __launch_bounds__(NTHREADS) gemm_regprefetch(const float* A, con
         } while (0)
 
         // TODO 1: 本块第 0 步的片段没人替它预取，在 kk 循环之前读进第 0 份：load_frag(regM[0], regN[0], cur, 0);
+        load_frag(regM[0], regN[0], cur, 0);
 
         #pragma unroll
         for (int kk = 0; kk < BK; ++kk) {
             // TODO 2: 如果还有下一步（kk + 1 < BK），先把第 kk+1 步的片段读进"另一份"：第 (kk + 1) % 2 份
+            if (kk + 1 < BK) {
+                load_frag(regM[(kk + 1) % 2], regN[(kk + 1) % 2], cur, kk + 1);
+            }
 
             // TODO 3: 用第 kk % 2 份做外积：acc[i][j] += regM[kk % 2][i] * regN[kk % 2][j]
+            for (int i = 0; i < TM; ++i){
+                for (int j = 0; j < TN; ++j) {
+                    acc[i][j] += regM[kk % 2][i] * regN[kk % 2][j];
+                }
+            }
 
         }
         // 想一想：为什么这一行之后不需要额外的 __syncthreads()？下一块的第 0 步又是在哪里读的？
