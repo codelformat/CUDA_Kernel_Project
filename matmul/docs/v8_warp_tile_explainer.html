@@ -1,0 +1,230 @@
+<title>warp 级分块</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@600;700&display=swap" rel="stylesheet">
+<style>
+/* 布局：一块 16:9 画布（像视频），下面一条播放控制栏和章节列表。整页固定为深色"黑板"风格。 */
+:root{
+  --bg:#0f1114; --panel:#181b20; --fg:#ece7dc; --dim:#8a919c; --line:#2b3038; --accent:#58c4dd; --accent2:#f7d774;
+  --f-body:"Noto Sans SC","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono","DejaVu Sans Mono",Menlo,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:14px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:16px 32px}
+.wrap{max-width:1280px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.stage{position:relative;width:100%;aspect-ratio:16/9;max-width:100%;background:#15171c;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
+canvas{width:100%;height:100%;display:block}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button{font-family:var(--f-body);font-size:13px;background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--dim)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.primary{background:var(--accent);color:#0f1114;border-color:var(--accent);font-weight:700;min-width:70px}
+input[type=range]{flex:1 1 220px;min-width:0;accent-color:var(--accent)}
+select{font-family:var(--f-body);background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:5px}
+.time{font-family:var(--f-mono);font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+.chapters{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:6px}
+.chapters button{text-align:left;font-size:12.5px;line-height:1.4;padding:7px 10px}
+.chapters button.on{border-color:var(--accent);color:var(--accent)}
+.note{color:var(--dim);font-size:12.5px;max-width:80ch;line-height:1.6;margin:0}
+h1{font-size:18px;margin:0;font-weight:700}
+</style>
+
+<div class="wrap">
+  <h1>v8：warp 级分块（block → warp → 线程）</h1>
+  <div class="stage"><canvas id="cv" width="1920" height="1080" aria-label="动画讲解画面"></canvas></div>
+  <div class="bar">
+    <button id="bPrev" aria-label="上一段">⏮ 上一段</button>
+    <button id="bPlay" class="primary">播放</button>
+    <button id="bNext" aria-label="下一段">下一段 ⏭</button>
+    <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="进度">
+    <span class="time" id="tm">0:00 / 0:00</span>
+    <button id="bMute" aria-label="声音开关">声音：开</button>
+    <select id="spd" aria-label="速度"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
+  </div>
+  <div class="chapters" id="chs"></div>
+  <p class="note">配音由离线语音合成生成，字幕与配音同步；看不完可以暂停或调慢。键盘：空格 播放/暂停，← → 上一段/下一段。v7 的数据来自机器 B（RTX 3080 Ti Laptop，sm_86，CUDA 12.4）；v8 的结果留给你运行后填写。</p>
+</div>
+
+<script>
+(function(){
+// ======================= 基础绘图 =======================
+const W=1920,H=1080,CAPY=838;
+const C={bg:'#15171c',panel:'#1e2128',fg:'#ECE7DC',dim:'#8A919C',faint:'#30353e',blue:'#58C4DD',yellow:'#F7D774',green:'#83C167',
+  red:'#FC6255',teal:'#5CD0B3',purple:'#B48EF0',orange:'#F49F45',pink:'#E77FB4',ink:'#15171c'};
+const FS="'Noto Sans SC','Noto Sans CJK SC','PingFang SC','Microsoft YaHei',sans-serif";
+const FT="'Noto Serif SC','Noto Serif CJK SC',serif";
+const FM="'JetBrains Mono','DejaVu Sans Mono',Menlo,monospace";
+const cv=document.getElementById('cv');const ctx=cv.getContext('2d');
+const clamp=(x,a=0,b=1)=>Math.max(a,Math.min(b,x));
+const ease=x=>{x=clamp(x);return x<.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;};
+const seg=(p,a,b)=>ease((p-a)/(b-a));
+const lerp=(a,b,t)=>a+(b-a)*t;
+function T(s,x,y,o={}){ctx.save();ctx.globalAlpha=o.a??1;ctx.fillStyle=o.c||C.fg;ctx.font=`${o.w||400} ${o.s||34}px ${o.f||FS}`;
+  ctx.textAlign=o.al||'left';ctx.textBaseline=o.bl||'middle';ctx.fillText(String(s),x,y);ctx.restore();}
+function TS(parts,x,y,o={}){ // parts: [[text,color,weight?]]
+  ctx.save();ctx.font=`${o.w||400} ${o.s||34}px ${o.f||FS}`;let tw=0;parts.forEach(p=>{ctx.font=`${p[2]||o.w||400} ${o.s||34}px ${o.f||FS}`;tw+=ctx.measureText(p[0]).width;});
+  let cx=o.al==='center'?x-tw/2:x;ctx.globalAlpha=o.a??1;ctx.textBaseline='middle';
+  parts.forEach(p=>{ctx.font=`${p[2]||o.w||400} ${o.s||34}px ${o.f||FS}`;ctx.fillStyle=p[1]||C.fg;ctx.fillText(p[0],cx,y);cx+=ctx.measureText(p[0]).width;});ctx.restore();}
+function R(x,y,w,h,o={}){ctx.save();ctx.globalAlpha=o.a??1;ctx.beginPath();const r=o.r??6;ctx.roundRect(x,y,w,h,r);
+  if(o.fill){ctx.fillStyle=o.fill;ctx.fill();} if(o.stroke){ctx.lineWidth=o.lw||2;ctx.strokeStyle=o.stroke;if(o.dash)ctx.setLineDash(o.dash);ctx.stroke();} ctx.restore();}
+function L(x1,y1,x2,y2,o={}){ctx.save();ctx.globalAlpha=o.a??1;ctx.strokeStyle=o.c||C.dim;ctx.lineWidth=o.lw||2;if(o.dash)ctx.setLineDash(o.dash);
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();ctx.restore();}
+function AR(x1,y1,x2,y2,o={}){L(x1,y1,x2,y2,o);const a=Math.atan2(y2-y1,x2-x1),h=o.h||16;ctx.save();ctx.globalAlpha=o.a??1;ctx.fillStyle=o.c||C.dim;
+  ctx.beginPath();ctx.moveTo(x2,y2);ctx.lineTo(x2-h*Math.cos(a-.4),y2-h*Math.sin(a-.4));ctx.lineTo(x2-h*Math.cos(a+.4),y2-h*Math.sin(a+.4));ctx.closePath();ctx.fill();ctx.restore();}
+// 矩阵格子
+function G(x,y,rows,cols,cs,o={}){const gap=o.gap??3;for(let i=0;i<rows;i++)for(let j=0;j<cols;j++){
+  const cx=x+j*(cs+gap),cy=y+i*(cs+gap);const f=o.fill?o.fill(i,j):C.panel;if(f===null)continue;
+  R(cx,cy,cs,cs,{fill:f,stroke:o.stroke?o.stroke(i,j):null,lw:o.lw||3,r:o.r??5,a:o.a??1});
+  if(o.val){const v=o.val(i,j);if(v!==''&&v!=null)T(v,cx+cs/2,cy+cs/2+1,{al:'center',s:o.s||Math.round(cs*.46),f:FM,c:o.tc?o.tc(i,j):C.fg,a:o.a??1,w:o.tw||400});}}
+  return {w:cols*(cs+gap)-gap,h:rows*(cs+gap)-gap,cx:j=>x+j*(cs+gap)+cs/2,cy:i=>y+i*(cs+gap)+cs/2};}
+// 表格（逐行出现）
+function TB(x,y,rows,ws,p,o={}){const rh=o.rh||54,s=o.s||28;let yy=y;const n=rows.length;
+  rows.forEach((r,ri)=>{const a=ri===0?seg(p,0,.08):seg(p,.04+ri*(o.step||.07),.12+ri*(o.step||.07));if(a<=0){yy+=rh;return;}
+    if(ri===0)L(x,yy+rh-6,x+ws.reduce((s,v)=>s+v,0),yy+rh-6,{c:C.faint,a});
+    let xx=x;r.forEach((cell,ci)=>{const hl=o.hl&&o.hl(ri,ci);
+      T(cell,xx+8,yy+rh/2-4,{s:ri===0?s-4:s,c:ri===0?C.dim:(hl?hl:(ci===0?C.fg:C.fg)),a,f:(o.mono&&ci>0&&ri>0)?FM:FS,w:ri===0?400:(hl?700:400)});xx+=ws[ci];});yy+=rh;});}
+// 逐条列表
+function LI(x,y,items,p,o={}){const gap=o.gap||62,s=o.s||32;items.forEach((it,i)=>{const a=seg(p,(o.t0??.03)+i*(o.step||.09),(o.t0??.03)+i*(o.step||.09)+.08);if(a<=0)return;
+  const yy=y+i*gap;if(Array.isArray(it))TS(it,x+(1-a)*20,yy,{s,a});else T(it,x+(1-a)*20,yy,{s,a,c:o.c});});}
+function CODE(x,y,lines,hl,o={}){const s=o.s||27,lh=s*1.65;R(x-18,y-lh*0.7,o.w||820,lh*lines.length+lh*0.4,{fill:'#11131700',stroke:C.faint,lw:2,r:10,a:o.a??1});
+  lines.forEach((l,i)=>{const on=hl&&hl.includes(i);if(on)R(x-14,y+i*lh-lh/2,(o.w||820)-8,lh,{fill:'rgba(88,196,221,.14)',r:4,a:o.a??1});
+    T(l,x,y+i*lh,{f:FM,s,c:on?C.blue:(l.trim().startsWith('//')?C.dim:C.fg),a:o.a??1});});}
+function TITLE(s,o={}){T(s,96,96,{s:o.s||54,f:FT,w:700,c:o.c||C.fg,a:o.a??1});}
+function SUB(s,y,o={}){T(s,96,y||156,{s:30,c:C.dim,a:o.a??1});}
+function caption(text,a){ctx.save();ctx.globalAlpha=a;ctx.fillStyle='rgba(10,11,14,.82)';ctx.fillRect(0,CAPY,W,H-CAPY);ctx.restore();
+  ctx.save();ctx.fillStyle=C.fg;ctx.globalAlpha=a;ctx.textBaseline='top';const maxW=W-200;let lines,fs=33;
+  for(fs of [33,30,28]){ctx.font=`400 ${fs}px ${FS}`;let line='';lines=[];for(const ch of text){const t=line+ch;if(ctx.measureText(t).width>maxW&&line){lines.push(line);line=ch;}else line=t;}if(line)lines.push(line);if(lines.length<=4)break;}
+  const lh=Math.round(fs*1.38),y0=CAPY+(H-CAPY-lines.length*lh)/2-4;lines.forEach((l,i)=>ctx.fillText(l,100,y0+i*lh));ctx.restore();}
+
+// ======================= 数据 =======================
+const A4=[[1,2,0,1],[3,1,2,0],[0,1,1,2],[2,0,1,1]],B4=[[1,0,2,1],[0,1,1,2],[2,1,0,1],[1,1,1,0]];
+const mm=(A,B,k0=0,k1=A[0].length)=>A.map((r,i)=>B[0].map((_,j)=>{let s=0;for(let k=k0;k<k1;k++)s+=A[i][k]*B[k][j];return s;}));
+const C4=mm(A4,B4),P4=mm(A4,B4,0,2),Q4=mm(A4,B4,2,4);
+const A2=[[1,2],[3,4]],B2=[[5,6],[7,8]],C2=mm(A2,B2);
+
+// ======================= 章节与段落 =======================
+const CH=[];
+function chapter(name,beats){CH.push({name,beats});}
+// 128×128 的 block 小块画成 32×32 格，每格代表 4×4 个输出
+function blockGrid(x,y,cs,fill){G(x,y,32,32,cs,{gap:1,r:2,fill});}
+const v7own=(i,j)=>(i<2||(i>=16&&i<18));                 // v7 warp 0：行 0–7、64–71（格行 0,1,16,17），全部 32 列
+const v8own=(i,j,w)=>{const wy=Math.floor(w/4),wx=w%4;return i>=wy*16&&i<wy*16+16&&j>=wx*8&&j<wx*8+8;};
+const LC=[C.blue,C.yellow,C.purple,C.teal,C.orange,C.green,C.pink,C.red];
+
+chapter('1 · 回顾：v7 卡在哪里',[
+ {cap:'这一段讲 v8：warp 级分块。先回顾位置：v7 在 2048 的三次方上达到 cuBLAS 的 69.8%。我们已经有两层复用：block 把 A、B 的小块搬进共享内存，全 block 共用；每个线程把 8 个 A、8 个 B 读进寄存器，做 8 乘 8 的外积。中间还缺一层：warp。共享内存的读取，是以 warp 为单位发出的。',
+  draw:p=>{T('v8：warp 级分块',W/2,300,{al:'center',s:96,f:FT,w:700,a:seg(p,0,.2)});
+    TS([['block 小块 ',C.blue],['→  ',C.dim],['warp 小块',C.yellow,700],['  →  ',C.dim],['线程小块',C.green]],W/2,450,{al:'center',s:46,a:seg(p,.2,.4)});
+    T('显存 → 共享内存：block 共用      共享内存 → 寄存器：线程复用',W/2,560,{al:'center',s:32,c:C.dim,a:seg(p,.4,.6)});
+    T('中间缺的一层：共享内存的读取是按 warp 发出的',W/2,640,{al:'center',s:34,c:C.yellow,a:seg(p,.6,.8)});}},
+ {cap:'先看 v7 里一个 warp 负责哪些输出。v7 的线程排成 16 乘 16，warp 0 是 ty 等于 0 和 1、tx 从 0 到 15 这 32 个线程。按 v7 的映射，它们负责的行是 0 到 7 和 64 到 71，列是全部 128 列。图里每一小格代表 4 乘 4 个输出，亮起来的就是 warp 0 的地盘：16 行乘 128 列，又扁又长。',
+  draw:p=>{TITLE('v7：warp 0 负责的输出（每小格 = 4×4 个输出）');const a=seg(p,.15,.4);
+    blockGrid(140,200,16,(i,j)=>v7own(i,j)&&a>0?C.blue:C.faint);
+    LI(820,260,[[['warp 0：',C.dim],['ty = 0, 1；tx = 0 … 15',C.fg]],[['行：',C.dim],['0–7 和 64–71，共 16 行',C.blue]],[['列：',C.dim],['0–127，全部 128 列',C.blue]],[['形状：',C.dim],['16 × 128，又扁又长',C.red]]],p,{s:34,gap:82,t0:.35,step:.12});}},
+ {cap:'这个形状为什么不好？每个 kk，这个 warp 要做 16 乘 128 等于 2048 次乘加，需要的数据是：它负责的 16 行各一个 A，加上 128 列各一个 B，一共 144 个数。这些数都要从共享内存送给这个 warp。共享内存的带宽是全 SM 共用的，每个 warp 要的数越多，送数据的轮数就越多。',
+  draw:p=>{TITLE('每个 kk：16 个 A + 128 个 B = 144 个数');const cs=12;
+    for(let i=0;i<16;i++)R(160,230+i*(cs+3),cs*2,cs,{fill:C.blue,a:seg(p,.05,.25),r:2});T('A：16 个',172,230+16*(cs+3)+30,{al:'center',s:28,c:C.blue,a:seg(p,.05,.25)});
+    for(let j=0;j<128;j++)R(260+j*11,200,9,cs*2,{fill:C.yellow,a:seg(p,.2,.4),r:1});T('B：128 个',260+64*11,180,{al:'center',s:28,c:C.yellow,a:seg(p,.2,.4)});
+    R(260,230,128*11,16*(cs+3),{fill:C.purple+'44',stroke:C.purple,lw:2,a:seg(p,.35,.5)});T('16 × 128 = 2048 次乘加',260+64*11,230+8*(cs+3),{al:'center',s:34,a:seg(p,.35,.5)});
+    T('数据量 = 行数 + 列数 = 16 + 128 = 144',W/2,620,{al:'center',s:40,c:C.yellow,a:seg(p,.55,.7)});}},
+]);
+
+chapter('2 · 原理：同样的面积，越方越省',[
+ {cap:'这和第一章外积是同一个道理。一块 R 行 C 列的区域，每个 kk 要 R 个 A 和 C 个 B，也就是 R 加 C 个数，做 R 乘 C 次乘加。面积固定为 2048 时，16 乘 128 要 144 个数，32 乘 64 要 96 个，64 乘 32 也是 96 个。区域越接近正方形，周长越短，要读的数越少。v8 选 64 乘 32。',
+  draw:p=>{TITLE('面积相同（2048），比较"行数 + 列数"');const sh=[[16,128,144,C.red],[32,64,96,C.green],[64,32,96,C.green]];
+    sh.forEach((s,i)=>{const a=seg(p,.05+i*.18,.2+i*.18);const k=3.4;const x=140+i*560,y=240;R(x,y,s[1]*k,s[0]*k,{fill:s[3]+'33',stroke:s[3],lw:3,a});
+      T(`${s[0]} × ${s[1]}`,x,y-24,{s:32,a});T(`读 ${s[0]} + ${s[1]} = ${s[2]} 个数`,x,y+s[0]*k+40,{s:32,c:s[3],a,w:700});});
+    T('乘加次数一样，读的数少了三分之一',W/2,720,{al:'center',s:38,c:C.yellow,a:seg(p,.65,.8)});}},
+]);
+
+chapter('3 · v8 的三层分块',[
+ {cap:'v8 先把 128 乘 128 的 block 小块切给 8 个 warp：8 个 warp 排成 2 行乘 4 列，每个 warp 负责一块 64 行乘 32 列的 warp 小块。图里每种颜色是一个 warp 的地盘，现在每块都是方方正正的一整块。warp 编号 w 的位置是：warpY 等于 w 除以 4，warpX 等于 w 除以 4 的余数；左上角是第 warpY 乘 64 行、第 warpX 乘 32 列。',
+  draw:p=>{TITLE('第一层切分：block 128×128 → 8 个 warp，每个 64×32');
+    blockGrid(140,200,16,(i,j)=>{for(let w=0;w<8;w++)if(v8own(i,j,w))return seg(p,.05+w*.05,.1+w*.05)>0?LC[w]+'bb':C.faint;return C.faint;});
+    for(let w=0;w<8;w++){const wy=Math.floor(w/4),wx=w%4;T(`w${w}`,140+wx*8*17+4*17,200+wy*16*17+8*17,{al:'center',s:30,w:700,c:C.ink,a:seg(p,.4,.5)});}
+    LI(820,260,[[['warpId = tid / 32',C.fg]],[['warpY = warpId / 4，',C.fg],['warpX = warpId % 4',C.fg]],[['warpRow0 = warpY × 64',C.yellow]],[['warpCol0 = warpX × 32',C.yellow]]],p,{s:34,gap:80,t0:.5,step:.1});}},
+ {cap:'第二层切分：warp 小块 64 乘 32 交给 warp 里的 32 个线程。32 个线程排成 8 行乘 4 列：ly 等于 lane 除以 4，lx 等于 lane 除以 4 的余数。每个线程仍然负责 8 乘 8 等于 64 个输出，但和 v7 一样拆成两组：行是 ly 乘 4 起的 4 行，和再往下 32 行的 4 行；列是 lx 乘 4 起的 4 列，和再往右 16 列的 4 列。图里一种颜色是一个线程，每个线程正好占 4 块。',
+  draw:p=>{TITLE('第二层切分：warp 小块 64×32 → 32 个线程');const cs=33;const lane=(i,j)=>(i%8)*4+(j%4);
+    G(140,190,16,8,cs,{gap:2,r:3,fill:(i,j)=>{const l=lane(i,j);const a=seg(p,.05,.35);return a>0?LC[l%8]+(l<8?'ee':(l<16?'aa':(l<24?'77':'44'))):C.faint;},val:(i,j)=>lane(i,j),s:16,tc:()=>C.ink});
+    L(140,190+8*(cs+2)-1,140+8*(cs+2),190+8*(cs+2)-1,{c:C.fg,lw:2,a:seg(p,.35,.45)});L(140+4*(cs+2)-1,190,140+4*(cs+2)-1,190+16*(cs+2),{c:C.fg,lw:2,a:seg(p,.35,.45)});
+    T('每格 = 4×4 输出，数字 = lane',140,170,{s:24,c:C.dim});
+    LI(500,240,[[['ly = lane / 4（0–7），',C.fg],['lx = lane % 4（0–3）',C.fg]],[['行：',C.dim],['ly×4 起 4 行，再加 32 行处 4 行',C.fg]],[['列：',C.dim],['lx×4 起 4 列，再加 16 列处 4 列',C.fg]],[['为什么是 32：',C.yellow],['8 个 ly × 4 行 = 32，铺满上半块',C.fg]],[['为什么是 16：',C.yellow],['4 个 lx × 4 列 = 16，铺满左半块',C.fg]],[['不漏不重：',C.green],['每格恰好一个线程负责',C.fg]]],p,{s:31,gap:72,t0:.4,step:.09});}},
+ {cap:'代入一个具体线程。tid 等于 77：77 除以 32 得 2，余 13，所以它在第 2 个 warp，lane 是 13。第 2 个 warp 在第 0 行第 2 列，左上角是第 0 行、第 64 列。lane 13 的 ly 是 3，lx 是 1。所以两组行从 12 和 44 开始，两组列从 68 和 84 开始。这个线程负责第 12 到 15、44 到 47 行，和第 68 到 71、84 到 87 列，一共 64 格。',
+  draw:p=>{TITLE('代入数字：tid = 77');TB(140,220,[['量','公式','结果'],['warpId, lane','77 / 32，77 % 32','2，13'],['warpY, warpX','2 / 4，2 % 4','0，2'],['warpRow0, warpCol0','0×64，2×32','0，64'],['ly, lx','13 / 4，13 % 4','3，1'],['r0, r1','0 + 3×4，r0 + 32','12，44'],['c0, c1','64 + 1×4，c0 + 16','68，84']],[420,560,360],p,{s:31,rh:64,mono:true,step:.09});}},
+]);
+
+chapter('4 · 冲突检查与写回',[
+ {cap:'会不会有 bank 冲突？硬件每轮处理 8 个线程，也就是 lane 0 到 7，对应 ly 等于 0、1，lx 等于 0 到 3。读 Bs 时，它们只要 4 个不同的 float4，正好是连续的 16 个数，占 16 个不同的 bank；ly 不同、lx 相同的线程读同一个地址，是广播。读 AsT 时，只要 2 个不同的 float4，ly 等于 0 和 1，连续的 8 个数。都没有冲突。',
+  draw:p=>{TITLE('lane 0–7 一轮：读 Bs 4 个 float4，读 AsT 2 个 float4');const cs=44;
+    for(let b=0;b<32;b++){R(100+b*(cs+6),280,cs,56,{fill:C.panel,r:4});T(b,100+b*(cs+6)+cs/2,260,{al:'center',s:18,f:FM,c:C.dim});}
+    for(let l=0;l<4;l++){const a=seg(p,.05+l*.08,.12+l*.08);for(let q=0;q<4;q++)R(100+(l*4+q)*(cs+6),284,cs,48,{fill:LC[l],a,r:3});T(`lx=${l}`,100+(l*4+1.5)*(cs+6)+cs/2,360,{al:'center',s:22,a});}
+    T('读 Bs：lane 0–7 只要 4 个不同的 float4（ly=0、1 读同一地址 → 广播）',100,430,{s:30,a:seg(p,.35,.5)});
+    for(let b=0;b<32;b++){R(100+b*(cs+6),490,cs,56,{fill:C.panel,r:4});}
+    for(let l=0;l<2;l++){const a=seg(p,.5+l*.08,.58+l*.08);for(let q=0;q<4;q++)R(100+(l*4+q)*(cs+6),494,cs,48,{fill:LC[l+4],a,r:3});T(`ly=${l}`,100+(l*4+1.5)*(cs+6)+cs/2,570,{al:'center',s:22,a});}
+    T('读 AsT：只要 2 个不同的 float4（lx=0–3 读同一地址 → 广播）',100,640,{s:30,a:seg(p,.7,.85)});}},
+ {cap:'再看指令数。每个线程每个 kk 仍然是读 2 个 A 的 float4、2 个 B 的 float4，所以共享内存读指令数和 v7 一模一样。省下的是另一样东西：一条读指令里，32 个线程要的不同数据变少了，共享内存实际送数据的轮数，也就是 ncu 里的 wavefront，应该会下降。具体降多少、能换来多少时间，请先写下预测，再运行验证。',
+  draw:p=>{TITLE('指令数不变，省的是"每条指令要送的不同数据"');TB(140,240,[['每个 warp、每个 kk','v7','v8'],['负责的输出形状','16 × 128','64 × 32'],['需要的不同数据','16 + 128 = 144 个','64 + 32 = 96 个'],['共享内存读指令（每线程）','4 条 float4','4 条 float4'],['共享内存 wavefront','6.29M（实测）','预测？'],['2048³ 用时','1.931 ms','预测？']],[560,380,380],p,{s:31,rh:66,mono:true,hl:(r,c)=>c===2&&r>=4?C.yellow:null});}},
+ {cap:'写回 C 也要检查合并。每一行、每一组，lx 等于 0 到 3 的 4 个线程各写一个 float4，合起来是一行里连续的 16 个数，64 字节；一条写指令里有 8 个 ly，就是 8 行，每行 2 个 sector，一共 16 个 sector。和 v7 一样，每个字节都只写一次。',
+  draw:p=>{TITLE('写回：每行 4 个线程 × float4 = 64 字节，8 行 = 16 个 sector');const cs=16;
+    for(let r=0;r<8;r++){const a=seg(p,.05+r*.06,.12+r*.06);T(`ly=${r}`,140,250+r*52,{s:24,c:C.dim,a});for(let c=0;c<32;c++){const l=Math.floor(c/4);const own=c<16;R(240+c*(cs+4),232+r*52,cs,36,{fill:own?LC[l%4]:C.faint,a,r:2});}
+      R(236,226+r*52,8*2*(cs+4)+2,48,{stroke:C.blue,lw:2,a:a*.8,r:4});}
+    T('每行 64 B = 2 个 sector；8 行 → 16 个 sector / 条写指令',240,690,{s:30,c:C.yellow,a:seg(p,.6,.75)});}},
+]);
+
+chapter('5 · 小结',[
+ {cap:'总结一下 v8：它没有减少任何指令，也没有改变搬运和同步，只是重新安排了"哪个线程负责哪 64 格"，让每个 warp 的地盘从 16 乘 128 变成 64 乘 32。这就是 block、warp、线程三层分块，也是 CUTLASS 的基本结构。到了 Tensor Core 阶段，最内层的"线程做 8 乘 8 外积"会换成"warp 发一条 mma 指令"，外面两层保持不变。现在请先写预测，再运行。',
+  draw:p=>{T('block → warp → 线程',W/2,300,{al:'center',s:80,f:FT,w:700,a:seg(p,0,.2)});
+    T('同样的面积，越方，要读的数越少',W/2,430,{al:'center',s:40,c:C.yellow,a:seg(p,.2,.4)});
+    T('Tensor Core 阶段：最内层换成 warp 级的 mma 指令',W/2,530,{al:'center',s:34,c:C.teal,a:seg(p,.4,.6)});
+    T('先预测：wavefront、2048³ 用时，再运行验证',W/2,630,{al:'center',s:34,c:C.dim,a:seg(p,.6,.8)});}},
+]);
+
+// ======================= 时间线与播放 =======================
+// 每段时长：有配音时 = 配音长度 + 首尾留白；否则按阅读速度估算
+const DUR=[25.78, 28.67, 26.78, 30.58, 33.85, 33.34, 34.9, 30.4, 28.89, 22.53, 31.29]; // 配音长度 + 0.6 s 前导 + 1.0 s 留白
+const LEAD=0.6;
+const BEATS=[];let total=0;let gi=0;
+CH.forEach((ch,ci)=>ch.beats.forEach((b,bi)=>{const n=[...b.cap].length;const dur=DUR?DUR[gi]:Math.max(9,Math.min(70,n/5+4));BEATS.push({...b,ci,bi,start:total,dur});total+=dur;gi++;}));
+window.__CAPS=BEATS.map(b=>b.cap);
+function beatAt(t){t=clamp(t,0,total-1e-6);let lo=0,hi=BEATS.length-1;while(lo<hi){const m=(lo+hi+1)>>1;if(BEATS[m].start<=t)lo=m;else hi=m-1;}return lo;}
+function render(t){const bi=beatAt(t),b=BEATS[bi];const local=t-b.start;const p=clamp(local/(b.dur*0.85));
+  ctx.setTransform(cv.width/W,0,0,cv.height/H,0,0);ctx.fillStyle=C.bg;ctx.fillRect(0,0,W,H);
+  ctx.save();ctx.globalAlpha=.25;for(let x=0;x<W;x+=60){L(x,0,x,CAPY,{c:'#1f232a',lw:1});}for(let y=0;y<CAPY;y+=60){L(0,y,W,y,{c:'#1f232a',lw:1});}ctx.restore();
+  const fade=Math.min(1,local/0.45,(b.dur-local)/0.35);ctx.save();ctx.globalAlpha=clamp(fade);b.draw(p);ctx.restore();
+  T(CH[b.ci].name,W-60,46,{al:'right',s:24,c:C.dim});
+  caption(b.cap,clamp(Math.min(1,local/0.4)));
+  ctx.fillStyle=C.faint;ctx.fillRect(0,H-6,W,6);ctx.fillStyle=C.blue;ctx.fillRect(0,H-6,W*t/total,6);}
+window.__TOTAL=total;window.__render=render;window.__BEATS=BEATS.map(b=>({ci:b.ci,start:b.start,dur:b.dur}));
+
+// 播放控制
+let now=0,playing=false,last=0,raf=0;const $=id=>document.getElementById(id);
+const fmt=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+function ui(){$('scrub').value=Math.round(now/total*1000);$('tm').textContent=`${fmt(now)} / ${fmt(total)}`;$('bPlay').textContent=playing?'暂停':(now>=total-0.01?'重播':'播放');
+  const ci=BEATS[beatAt(now)].ci;[...$('chs').children].forEach((b,i)=>b.classList.toggle('on',i===ci));}
+// 配音：每段一个音频文件 audio/bNN.mp3，进入该段 LEAD 秒后开始播放；文件不存在时静默跳过
+const AUD=BEATS.map((b,i)=>{const a=new Audio();a.preload='none';a.src=`audio/b${String(i).padStart(2,'0')}.mp3`;a.addEventListener('error',()=>{a._bad=true;});return a;});
+let curA=-1,muted=false;
+function stopAudio(){if(curA>=0){try{AUD[curA].pause();}catch(e){}}curA=-1;}
+function syncAudio(){if(!playing||muted)return;const bi=beatAt(now);const local=now-BEATS[bi].start;
+  if(curA!==bi&&local>=LEAD){stopAudio();const a=AUD[bi];if(a._bad)return;curA=bi;a.playbackRate=parseFloat($('spd').value);
+    try{a.currentTime=Math.max(0,local-LEAD);}catch(e){} a.play().catch(()=>{});
+    const nx=AUD[bi+1];if(nx&&nx.preload!=='auto'){nx.preload='auto';try{nx.load();}catch(e){}}}}
+function frame(ts){if(!playing)return;const dt=(ts-last)/1000;last=ts;now=Math.min(total,now+dt*parseFloat($('spd').value));render(now);ui();syncAudio();if(now>=total){playing=false;ui();return;}raf=requestAnimationFrame(frame);}
+function play(){if(now>=total-0.01)now=0;playing=true;last=performance.now();raf=requestAnimationFrame(frame);ui();}
+function pause(){playing=false;cancelAnimationFrame(raf);stopAudio();ui();}
+function seek(t){now=clamp(t,0,total);stopAudio();render(now);ui();}
+$('bPlay').onclick=()=>playing?pause():play();
+$('bNext').onclick=()=>{const i=beatAt(now);seek(i+1<BEATS.length?BEATS[i+1].start:total);};
+$('bPrev').onclick=()=>{const i=beatAt(now);const s=BEATS[i].start;seek(now-s>1.5||i===0?s:BEATS[i-1].start);};
+$('scrub').oninput=e=>seek(e.target.value/1000*total);
+$('bMute').onclick=()=>{muted=!muted;$('bMute').textContent=muted?'声音：关':'声音：开';if(muted)stopAudio();};
+$('spd').onchange=()=>{if(curA>=0)AUD[curA].playbackRate=parseFloat($('spd').value);};
+CH.forEach((ch,ci)=>{const b=document.createElement('button');b.type='button';b.textContent=ch.name;b.onclick=()=>{seek(BEATS.find(x=>x.ci===ci).start);};$('chs').appendChild(b);});
+document.addEventListener('keydown',e=>{if(['INPUT','SELECT'].includes(e.target.tagName))return;if(e.key===' '){e.preventDefault();playing?pause():play();}else if(e.key==='ArrowRight')$('bNext').click();else if(e.key==='ArrowLeft')$('bPrev').click();});
+const start=()=>{seek(0);};
+(document.fonts&&document.fonts.ready?document.fonts.ready:Promise.resolve()).then(start);start();
+})();
+</script>
