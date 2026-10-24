@@ -31,6 +31,12 @@
 #define WHALF_M (LANES_Y * 4)  // 32：行方向两组之间的间隔
 #define WHALF_N (LANES_X * 4)  // 16：列方向两组之间的间隔
 
+// 实验开关：-DEXTRA_SMEM=40960 给每个 block 多占 40 KB 不用的共享内存，
+// 使每个 SM 只放得下 1 个 block（16+40=56 KB，两个就超过 100 KB），用来单独测"每 SM 2 个 block"的作用
+#ifndef EXTRA_SMEM
+#define EXTRA_SMEM 0
+#endif
+
 __global__ void __launch_bounds__(NTHREADS) gemm_warptile(const float* A, const float* B, float* C, int M, int N, int K) {
     __shared__ __align__(16) float AsT[2][BK][BM];
     __shared__ __align__(16) float Bs[2][BK][BN];
@@ -50,6 +56,18 @@ __global__ void __launch_bounds__(NTHREADS) gemm_warptile(const float* A, const 
     //         最后得到这个线程两组行的起点 r0、r1，两组列的起点 c0、c1：
     //           r0 = warpRow0 + ly*4，r1 = r0 + WHALF_M；c0 = warpCol0 + lx*4，c1 = c0 + WHALF_N
     int r0 = 0, r1 = 0, c0 = 0, c1 = 0;
+    int warpId = tid / 32;
+    int lane = tid % 32;
+    int warpY = warpId / 4;
+    int warpX = warpId % 4;
+    int warpRow0 = warpY * 64;
+    int warpCol0 = warpX * 32;
+    int ly = lane / 4;
+    int lx = lane % 4;
+    r0 = warpRow0 + ly * 4;
+    r1 = r0 + WHALF_M;
+    c0 = warpCol0 + lx * 4;
+    c1 = c0 + WHALF_N;
     // ===============================================================================
 
     float acc[TM][TN] = {{0.0f}};
@@ -76,8 +94,23 @@ __global__ void __launch_bounds__(NTHREADS) gemm_warptile(const float* A, const 
         #pragma unroll
         for (int kk = 0; kk < BK; ++kk) {
             // TODO 2: regM[0..3] = AsT[cur][kk][r0 .. r0+3]，regM[4..7] = AsT[cur][kk][r1 .. r1+3]（各一个 float4）
+            float4 vA = *reinterpret_cast<const float4*>(&AsT[cur][kk][r0]);
+            regM[0] = vA.x; regM[1] = vA.y; regM[2] = vA.z; regM[3] = vA.w;
+            vA = *reinterpret_cast<const float4*>(&AsT[cur][kk][r1]);
+            regM[4] = vA.x; regM[5] = vA.y; regM[6] = vA.z; regM[7] = vA.w;
             // TODO 3: regN[0..3] = Bs[cur][kk][c0 .. c0+3]， regN[4..7] = Bs[cur][kk][c1 .. c1+3]
+            float4 vB = *reinterpret_cast<const float4*>(&Bs[cur][kk][c0]);
+            regN[0] = vB.x; regN[1] = vB.y; regN[2] = vB.z; regN[3] = vB.w;
+            vB = *reinterpret_cast<const float4*>(&Bs[cur][kk][c1]);
+            regN[4] = vB.x; regN[5] = vB.y; regN[6] = vB.z; regN[7] = vB.w;
             // TODO 4: 外积 acc[i][j] += regM[i] * regN[j]
+            #pragma unroll
+            for (int i = 0; i < TM; ++i) {
+                #pragma unroll
+                for (int j = 0; j < TN; ++j) {
+                    acc[i][j] += regM[i] * regN[j];
+                }
+            }
         }
         // ===============================================================================
 
@@ -94,6 +127,14 @@ __global__ void __launch_bounds__(NTHREADS) gemm_warptile(const float* A, const 
     // TODO 5: 写回。acc[i][j] 的行：i < 4 → r0 + i，否则 r1 + (i-4)；列：j < 4 → c0 + j，否则 c1 + (j-4)
     //         用 float4 写：每行 i，acc[i][0..3] 写到列 c0，acc[i][4..7] 写到列 c1
     // ===============================================================================
+    for (int i = 0; i < TM; ++i) {
+        int row = (i < 4) ? (r0 + i) : (r1 + (i - 4));
+        float4 vC;
+        vC.x = acc[i][0]; vC.y = acc[i][1]; vC.z = acc[i][2]; vC.w = acc[i][3];
+        *reinterpret_cast<float4*>(&C[row * N + c0]) = vC;
+        vC.x = acc[i][4]; vC.y = acc[i][5]; vC.z = acc[i][6]; vC.w = acc[i][7];
+        *reinterpret_cast<float4*>(&C[row * N + c1]) = vC;
+    }
 }
 
 void launch(const float* A, const float* B, float* C, int M, int N, int K) {
@@ -102,7 +143,9 @@ void launch(const float* A, const float* B, float* C, int M, int N, int K) {
     }
     dim3 block(NTHREADS);
     dim3 grid(N / BN, M / BM);
-    gemm_warptile<<<grid, block>>>(A, B, C, M, N, K);
+    if (EXTRA_SMEM > 0)
+        CK(cudaFuncSetAttribute(gemm_warptile, cudaFuncAttributeMaxDynamicSharedMemorySize, EXTRA_SMEM));
+    gemm_warptile<<<grid, block, EXTRA_SMEM>>>(A, B, C, M, N, K);
 }
 
 int main(int argc, char** argv) { return run_gemm_benchmark("08_warp_tile", launch, argc, argv); }
