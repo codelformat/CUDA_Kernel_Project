@@ -6,7 +6,7 @@
 // 命令行:  <程序> [M N K]   只给一个数就是 M=N=K=该数；默认 4096 4096 4096
 // 环境变量: PEAK_TFLOPS FP32 理论峰值；scripts/run.sh 按 GPU 型号从 machines/*.env 自动设置，未设置则不显示相对峰值的百分比
 //           WARMUP 热身次数(默认 3)   REPS 正式计时次数(默认 20)   TOL 相对误差阈值(默认 2e-5)
-//           SHOW_REPS=1 打印每次耗时   ME_FIRST=1 先测你的 kernel 再测 cuBLAS
+//           SHOW_REPS=1 打印每次耗时   默认 cuBLAS 与你的 kernel 交替计时；SEQUENTIAL=1 改为顺序计时（ME_FIRST=1 先测你的）
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -77,6 +77,36 @@ static float bench_median_ms(F&& f, int warmup, int reps) {
     return t[reps / 2];
 }
 
+// 交替计时：cuBLAS、你的 kernel 轮流各跑一次，两边经历同样的"GPU 越跑越热、降频"过程，比较才公平。
+// 笔记本 GPU 连续满载几十毫秒后会降频（实测 2048³ 时第 3 次左右开始，单次耗时从 1.35 ms 跳到 1.7–1.9 ms），
+// 顺序计时（先测完一个再测另一个）会让后测的那个吃亏。
+template <class F, class G>
+static void bench_interleaved(F&& f, G&& g, int warmup, int reps, float& med_f, float& med_g,
+                              float& min_f, float& max_f, float& min_g, float& max_g) {
+    for (int i = 0; i < warmup; ++i) { f(); g(); }
+    CK(cudaDeviceSynchronize());
+    cudaEvent_t a, b;
+    CK(cudaEventCreate(&a));
+    CK(cudaEventCreate(&b));
+    std::vector<float> tf(reps), tg(reps);
+    auto time1 = [&](auto&& h) {
+        float ms;
+        CK(cudaEventRecord(a)); h(); CK(cudaEventRecord(b));
+        CK(cudaEventSynchronize(b)); CK(cudaEventElapsedTime(&ms, a, b));
+        return ms;
+    };
+    for (int i = 0; i < reps; ++i) { tf[i] = time1(f); tg[i] = time1(g); }
+    CK(cudaEventDestroy(a));
+    CK(cudaEventDestroy(b));
+    if (getenv("SHOW_REPS")) {
+        printf("  每次耗时(ms) cuBLAS :"); for (float x : tf) printf(" %.3f", x); printf("\n");
+        printf("  每次耗时(ms) kernel :"); for (float x : tg) printf(" %.3f", x); printf("\n");
+    }
+    std::sort(tf.begin(), tf.end()); std::sort(tg.begin(), tg.end());
+    med_f = tf[reps / 2]; med_g = tg[reps / 2];
+    min_f = tf[0]; max_f = tf[reps - 1]; min_g = tg[0]; max_g = tg[reps - 1];
+}
+
 static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv) {
     int M = 4096, N = 4096, K = 4096;
     if (argc >= 4) { M = atoi(argv[1]); N = atoi(argv[2]); K = atoi(argv[3]); }
@@ -142,10 +172,14 @@ static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv
 
     // 计时
     const double flops = 2.0 * M * N * K;
-    // 默认先测 cuBLAS 再测你的 kernel；ME_FIRST=1 反过来，用来排除"后测的那个吃亏"（GPU 越跑越热、降频）
+    // 默认交替计时（公平）。SEQUENTIAL=1 改回旧的顺序计时：先测 cuBLAS 再测你的 kernel；
+    // 再加 ME_FIRST=1 则反过来。旧顺序计时下后测的一方会因降频吃亏（见 bench_interleaved 的说明）。
     float ms_ref, ms_me, ref_min, ref_max, me_min, me_max;
     auto run_me = [&]() { fn(dA, dB, dC, M, N, K); };
-    if (env_int("ME_FIRST", 0)) {
+    const bool sequential = env_int("SEQUENTIAL", 0) != 0;
+    if (!sequential) {
+        bench_interleaved(run_cublas, run_me, warmup, reps, ms_ref, ms_me, ref_min, ref_max, me_min, me_max);
+    } else if (env_int("ME_FIRST", 0)) {
         ms_me = bench_median_ms(run_me, warmup, reps);      me_min = g_last_min;  me_max = g_last_max;
         ms_ref = bench_median_ms(run_cublas, warmup, reps); ref_min = g_last_min; ref_max = g_last_max;
     } else {
@@ -162,8 +196,8 @@ static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv
     printf("cuBLAS SGEMM : median %9.3f ms   %7.2f TFLOPS   (%s)\n", ms_ref, tf_ref, pk_ref);
     printf("%-13s: median %9.3f ms   %7.2f TFLOPS   (%s%5.1f%% of cuBLAS)\n",
            name, ms_me, tf_me, pk_me, 100.0 * tf_me / tf_ref);
-    printf("  (最快 / 最慢 ms：cuBLAS %.3f / %.3f，%s %.3f / %.3f；%d 次热身 + %d 次计时)\n",
-           ref_min, ref_max, name, me_min, me_max, warmup, reps);
+    printf("  (最快 / 最慢 ms：cuBLAS %.3f / %.3f，%s %.3f / %.3f；%d 次热身 + %d 次计时，%s)\n",
+           ref_min, ref_max, name, me_min, me_max, warmup, reps, sequential ? "顺序计时" : "交替计时");
 
     CKB(cublasDestroy(handle));
     CK(cudaFree(dA)); CK(cudaFree(dB)); CK(cudaFree(dC)); CK(cudaFree(dRef));
