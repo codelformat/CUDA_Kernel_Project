@@ -29,6 +29,8 @@ __global__ void gemm_wmma_naive(const half* A, const half* B, float* C, int M, i
     // TODO 1: 这个 warp 负责 C 的哪个 16×16 小块？算出它左上角的行 row0、列 col0。
     //         提示：block 负责 (WARPS_Y*16) × (WARPS_X*16) 的区域，用"第几份 × 每份大小"。
     int row0 = 0, col0 = 0;
+    row0 = blockIdx.y * (WARPS_Y * WM) + warpY * WM;
+    col0 = blockIdx.x * (WARPS_X * WN) + warpX * WN;
 
     // 三个片段：a 是行主序的 16×16 half，b 是行主序的 16×16 half，c 是 16×16 float 累加器
     wmma::fragment<wmma::matrix_a, WM, WN, WK, half, wmma::row_major> a_frag;
@@ -36,15 +38,20 @@ __global__ void gemm_wmma_naive(const half* A, const half* B, float* C, int M, i
     wmma::fragment<wmma::accumulator, WM, WN, WK, float> c_frag;
 
     // TODO 2: 把 c_frag 清零（wmma::fill_fragment）
+    wmma::fill_fragment(c_frag, 0.0f);
 
     for (int k = 0; k < K; k += WK) {
         // TODO 3: 从显存读 a 的 16×16 小块：左上角是 A 的第 row0 行、第 k 列；A 每行有 K 个数（leading dimension = K）
         //         wmma::load_matrix_sync(a_frag, 指向左上角的指针, leading dimension);
+        wmma::load_matrix_sync(a_frag, A + row0 * K + k, K);
         // TODO 4: 读 b 的 16×16 小块：左上角是 B 的第 k 行、第 col0 列；B 每行有 N 个数
+        wmma::load_matrix_sync(b_frag, B + k * N + col0, N);
         // TODO 5: c_frag += a_frag · b_frag   （wmma::mma_sync(c_frag, a_frag, b_frag, c_frag)）
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
     }
 
     // TODO 6: 把 c_frag 写回 C：左上角 C 的第 row0 行、第 col0 列，每行 N 个数，行主序（wmma::mem_row_major）
+    wmma::store_matrix_sync(C + row0 * N + col0, c_frag, N, wmma::mem_row_major);
 }
 // ========================================================================
 
