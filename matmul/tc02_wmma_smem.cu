@@ -40,6 +40,9 @@ __global__ void __launch_bounds__(NTHREADS) gemm_wmma_smem(const half* A, const 
     // TODO 1: 这个 warp 在 block 里负责哪块 64×32？（同 v8：8 个 warp 排成 2 行 × 4 列）
     //         算出 warpRow0（0 或 64）、warpCol0（0、32、64、96）
     int warpRow0 = 0, warpCol0 = 0;
+    int warpId = tid / 32;
+    warpRow0 = (warpId / 4) * 64;
+    warpCol0 = (warpId % 4) * 32;
     // ===============================================================================
 
     // 8 个累加片段：acc[i][j] 是这个 warp 负责的第 i 行、第 j 列的 16×16
@@ -68,8 +71,19 @@ __global__ void __launch_bounds__(NTHREADS) gemm_wmma_smem(const half* A, const 
         #pragma unroll
         for (int kk = 0; kk < BK; kk += WK) {
             // TODO 2: 读 FM=4 个 A 片段：第 i 个的左上角是 As 的第 (warpRow0 + i*16) 行、第 kk 列，leading dimension = BK
+            for (int i = 0; i < FM; ++i) {
+                wmma::load_matrix_sync(a_frag[i], &As[warpRow0 + i * 16][kk], BK);
+            }
             // TODO 3: 读 FN=2 个 B 片段：第 j 个的左上角是 Bs 的第 kk 行、第 (warpCol0 + j*16) 列，leading dimension = BN
+            for (int j = 0; j < FN; ++j) {
+                wmma::load_matrix_sync(b_frag[j], &Bs[kk][warpCol0 + j * 16], BN);
+            }
             // TODO 4: 外积：acc[i][j] += a_frag[i] · b_frag[j]，共 4 × 2 = 8 次 mma_sync
+            for (int i = 0; i < FM; ++i) {
+                for (int j = 0; j < FN; ++j) {
+                    wmma::mma_sync(acc[i][j], a_frag[i], b_frag[j], acc[i][j]);
+                }
+            }
         }
         // ===============================================================================
         __syncthreads();
@@ -79,6 +93,11 @@ __global__ void __launch_bounds__(NTHREADS) gemm_wmma_smem(const half* A, const 
     // TODO 5: 把 8 个累加片段写回 C：acc[i][j] 的左上角是 C 的第 (warpRow0 + i*16) 行、第 (warpCol0 + j*16) 列，
     //         每行 N 个数，wmma::mem_row_major
     // ===============================================================================
+    for (int i = 0; i < FM; ++i) {
+        for (int j = 0; j < FN; ++j) {
+            wmma::store_matrix_sync(C + (warpRow0 + i * 16) * N + (warpCol0 + j * 16), acc[i][j], N, wmma::mem_row_major);
+        }
+    }
 }
 
 void launch(const half* A, const half* B, float* C, int M, int N, int K) {
