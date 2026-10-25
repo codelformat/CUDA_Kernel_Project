@@ -42,6 +42,8 @@ nvcc 12.4，Nsight Compute 可用。FP32 理论峰值约 31 TFLOPS（按最高�
 
 v8 warp 级分块动画讲解（约 5 分半）：[docs/v8_warp_tile_explainer.html](docs/v8_warp_tile_explainer.html)
 
+tc02 张量核心 + 共享内存分块动画讲解（约 6 分钟）：[docs/tc02_wmma_smem_explainer.html](docs/tc02_wmma_smem_explainer.html)
+
 ## 进度
 | 课 | 内容 | 机器 | 当时记录的结果（1024³，相对 cuBLAS；2048³ 为旧的顺序计时，偏低） |
 |---|---|---|---|
