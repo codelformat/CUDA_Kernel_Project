@@ -5,13 +5,15 @@
 //
 // 约定（行主序 row-major）：A 是 M×K，B 是 K×N，C 是 M×N；C = A · B。
 // 命令行:  <程序> [M N K]，默认 4096 4096 4096
-// 环境变量: WARMUP(3) REPS(20) TOL 相对误差阈值（默认 1e-3：输入只有 fp16 精度，累加顺序也和 cuBLAS 不同）
+// 计时：GemmEx、SGEMM、你的 kernel 三者交替各跑一次（公平，见 RESULTS.md「测量方法修正」）
+// 环境变量: SHOW_REPS=1  WARMUP(3) REPS(20) TOL 相对误差阈值（默认 1e-3：输入只有 fp16 精度，累加顺序也和 cuBLAS 不同）
 #pragma once
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <vector>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -33,19 +35,28 @@ static void fill_random(std::vector<float>& v, uint32_t seed) {
     for (auto& x : v) { s ^= s << 13; s ^= s >> 17; s ^= s << 5; x = (float)(s >> 8) * (2.0f / 16777216.0f) - 1.0f; }
 }
 
+// 交替计时：几个被测对象轮流各跑一次（笔记本 GPU 连续满载会降频，顺序计时会让后测的吃亏，见 RESULTS.md「测量方法修正」）。
+// fs 里每个函数各计时 reps 次，返回各自的中位数。SHOW_REPS=1 打印每次耗时。
 template <class F>
-static float bench_median_ms(F&& f, int warmup, int reps) {
-    for (int i = 0; i < warmup; ++i) f();
+static std::vector<float> bench_interleaved(std::vector<F>& fs, int warmup, int reps) {
+    const size_t n = fs.size();
+    for (int i = 0; i < warmup; ++i) for (auto& f : fs) f();
     CK(cudaDeviceSynchronize());
     cudaEvent_t a, b; CK(cudaEventCreate(&a)); CK(cudaEventCreate(&b));
-    std::vector<float> t(reps);
-    for (int i = 0; i < reps; ++i) {
-        CK(cudaEventRecord(a)); f(); CK(cudaEventRecord(b));
-        CK(cudaEventSynchronize(b)); CK(cudaEventElapsedTime(&t[i], a, b));
-    }
+    std::vector<std::vector<float>> t(n, std::vector<float>(reps));
+    for (int i = 0; i < reps; ++i)
+        for (size_t j = 0; j < n; ++j) {
+            CK(cudaEventRecord(a)); fs[j](); CK(cudaEventRecord(b));
+            CK(cudaEventSynchronize(b)); CK(cudaEventElapsedTime(&t[j][i], a, b));
+        }
     CK(cudaEventDestroy(a)); CK(cudaEventDestroy(b));
-    std::sort(t.begin(), t.end());
-    return t[reps / 2];
+    std::vector<float> med(n);
+    for (size_t j = 0; j < n; ++j) {
+        if (getenv("SHOW_REPS")) { printf("  每次耗时(ms) #%zu:", j); for (float x : t[j]) printf(" %.3f", x); printf("\n"); }
+        std::sort(t[j].begin(), t[j].end());
+        med[j] = t[j][reps / 2];
+    }
+    return med;
 }
 
 static int run_gemm_tc_benchmark(const char* name, GemmTcFn fn, int argc, char** argv) {
@@ -108,9 +119,9 @@ static int run_gemm_tc_benchmark(const char* name, GemmTcFn fn, int argc, char**
            max_err, worst / N, worst % N, max_ref, rel, n_nan, pass ? "PASS" : "FAIL", tol);
 
     const double flops = 2.0 * M * N * K;
-    const float ms_ref = bench_median_ms(run_ref, warmup, reps);
-    const float ms_sg = bench_median_ms(run_sgemm, warmup, reps);
-    const float ms_me = bench_median_ms([&]() { fn(dA, dB, dC, M, N, K); }, warmup, reps);
+    std::vector<std::function<void()>> fs = {run_ref, run_sgemm, [&]() { fn(dA, dB, dC, M, N, K); }};
+    const std::vector<float> med = bench_interleaved(fs, warmup, reps);   // #0 GemmEx  #1 SGEMM  #2 你的 kernel
+    const float ms_ref = med[0], ms_sg = med[1], ms_me = med[2];
     auto tf = [&](float ms) { return flops / (ms * 1e-3) / 1e12; };
     printf("cuBLAS SGEMM (fp32, CUDA core) : median %9.3f ms   %7.2f TFLOPS\n", ms_sg, tf(ms_sg));
     printf("cuBLAS GemmEx (fp16, 张量核心)  : median %9.3f ms   %7.2f TFLOPS   (%.2f× SGEMM)\n", ms_ref, tf(ms_ref), ms_sg / ms_ref);
