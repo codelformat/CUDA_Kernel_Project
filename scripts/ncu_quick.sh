@@ -3,6 +3,7 @@
 # 用法:   scripts/ncu_quick.sh <可执行文件> <kernel 名正则> [程序参数...]
 # 例:     scripts/ncu_quick.sh results/01_naive_20261017-090000/01_naive gemm_naive 1024 1024 1024
 # 环境变量: NCU_METRICS="a,b,c"  覆盖默认指标      NCU_COUNT=1  抓取前几次匹配的 kernel 启动
+# kernel 名按完整名字（demangled）匹配：cuBLAS 的 kernel 基础名常是 "Kernel2"，完整名里才有 sgemm。
 # 默认用 --clock-control none：GPU 按真实时钟运行，耗时与平时一致（ncu 默认会锁到基础频率）。
 set -eo pipefail
 [ $# -ge 2 ] || { sed -n '2,7p' "$0"; exit 2; }
@@ -29,7 +30,7 @@ smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio,\
 smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio"
 METRICS="${NCU_METRICS:-$DEFAULT_METRICS}"
 RAW=$(mktemp); trap 'rm -f "$RAW"' EXIT
-ncu --csv --clock-control none -k "regex:$KRE" -c "${NCU_COUNT:-1}" --metrics "$METRICS" "$BIN" "$@" >"$RAW" 2>&1 || true
+ncu --csv --clock-control none --kernel-name-base demangled -k "regex:$KRE" -c "${NCU_COUNT:-1}" --metrics "$METRICS" "$BIN" "$@" >"$RAW" 2>&1 || true
 python3 -I - "$RAW" <<'PY'
 import csv, sys
 rows, errs = [], []
