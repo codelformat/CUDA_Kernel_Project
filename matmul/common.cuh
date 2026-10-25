@@ -6,6 +6,7 @@
 // 命令行:  <程序> [M N K]   只给一个数就是 M=N=K=该数；默认 4096 4096 4096
 // 环境变量: PEAK_TFLOPS FP32 理论峰值；scripts/run.sh 按 GPU 型号从 machines/*.env 自动设置，未设置则不显示相对峰值的百分比
 //           WARMUP 热身次数(默认 3)   REPS 正式计时次数(默认 20)   TOL 相对误差阈值(默认 2e-5)
+//           SHOW_REPS=1 打印每次耗时   ME_FIRST=1 先测你的 kernel 再测 cuBLAS
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -48,6 +49,7 @@ static void fill_random(std::vector<float>& v, uint32_t seed) {
 }
 
 // 对 f() 计时：每次只用 event 围住一次调用，返回 reps 次的中位数（ms）
+static float g_last_min = 0.f, g_last_max = 0.f;   // 最近一次 bench_median_ms 的最快 / 最慢
 template <class F>
 static float bench_median_ms(F&& f, int warmup, int reps) {
     for (int i = 0; i < warmup; ++i) f();
@@ -65,7 +67,13 @@ static float bench_median_ms(F&& f, int warmup, int reps) {
     }
     CK(cudaEventDestroy(a));
     CK(cudaEventDestroy(b));
+    if (getenv("SHOW_REPS")) {   // SHOW_REPS=1：按运行顺序打印每次耗时，用来看"越跑越慢"（降频）
+        printf("  每次耗时(ms):");
+        for (int i = 0; i < reps; ++i) printf(" %.3f", t[i]);
+        printf("\n");
+    }
     std::sort(t.begin(), t.end());
+    g_last_min = t[0]; g_last_max = t[reps - 1];
     return t[reps / 2];
 }
 
@@ -134,8 +142,16 @@ static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv
 
     // 计时
     const double flops = 2.0 * M * N * K;
-    const float ms_ref = bench_median_ms(run_cublas, warmup, reps);
-    const float ms_me = bench_median_ms([&]() { fn(dA, dB, dC, M, N, K); }, warmup, reps);
+    // 默认先测 cuBLAS 再测你的 kernel；ME_FIRST=1 反过来，用来排除"后测的那个吃亏"（GPU 越跑越热、降频）
+    float ms_ref, ms_me, ref_min, ref_max, me_min, me_max;
+    auto run_me = [&]() { fn(dA, dB, dC, M, N, K); };
+    if (env_int("ME_FIRST", 0)) {
+        ms_me = bench_median_ms(run_me, warmup, reps);      me_min = g_last_min;  me_max = g_last_max;
+        ms_ref = bench_median_ms(run_cublas, warmup, reps); ref_min = g_last_min; ref_max = g_last_max;
+    } else {
+        ms_ref = bench_median_ms(run_cublas, warmup, reps); ref_min = g_last_min; ref_max = g_last_max;
+        ms_me = bench_median_ms(run_me, warmup, reps);      me_min = g_last_min;  me_max = g_last_max;
+    }
     const double tf_ref = flops / (ms_ref * 1e-3) / 1e12;
     const double tf_me = flops / (ms_me * 1e-3) / 1e12;
     char pk_ref[64] = "PEAK_TFLOPS 未设置", pk_me[64] = "";
@@ -146,6 +162,8 @@ static int run_gemm_benchmark(const char* name, GemmFn fn, int argc, char** argv
     printf("cuBLAS SGEMM : median %9.3f ms   %7.2f TFLOPS   (%s)\n", ms_ref, tf_ref, pk_ref);
     printf("%-13s: median %9.3f ms   %7.2f TFLOPS   (%s%5.1f%% of cuBLAS)\n",
            name, ms_me, tf_me, pk_me, 100.0 * tf_me / tf_ref);
+    printf("  (最快 / 最慢 ms：cuBLAS %.3f / %.3f，%s %.3f / %.3f；%d 次热身 + %d 次计时)\n",
+           ref_min, ref_max, name, me_min, me_max, warmup, reps);
 
     CKB(cublasDestroy(handle));
     CK(cudaFree(dA)); CK(cudaFree(dB)); CK(cudaFree(dC)); CK(cudaFree(dRef));
