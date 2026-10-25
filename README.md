@@ -6,7 +6,7 @@
 | 算子 | 状态 | 实验机器 | 一句话结果 |
 |---|---|---|---|
 | **LayerNorm**（`kernels/`） | 已完成 | 机器 A：RTX PRO 6000 | 比最初版快约 19 倍，达到 PyTorch 的 107%、带宽上限的 97% |
-| **matmul**（`matmul/`） | 进行中 | 机器 B：RTX 3080 Ti Laptop | 路线：CUDA core 分块优化 → 张量核心（`mma.sync`）→ CUTLASS，见 [matmul/README.md](matmul/README.md) |
+| **matmul**（`matmul/`） | FP32 阶段完成，张量核心进行中 | 机器 B：RTX 3080 Ti Laptop | FP32 手写 GEMM 从 cuBLAS 的 11.5% 优化到 **2048³ 约 99%、4096³ 约 94%**；下一步张量核心（`mma.sync`）→ CUTLASS，见 [matmul/README.md](matmul/README.md) |
 
 ## 实验环境
 | | 机器 A | 机器 B |
